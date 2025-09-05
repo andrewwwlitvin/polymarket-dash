@@ -1,0 +1,3 @@
+Analyzing resolution times helps align trades with attention spans. Near-term contracts often move more dramatically than long-horizon ones.
+
+Balancing volume signals with time-to-resolve can uncover optimal entry points.

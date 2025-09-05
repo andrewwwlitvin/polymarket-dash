@@ -1,0 +1,3 @@
+Spreads serve as friction costs for traders. The narrower the spread, the more efficiently belief is priced.
+
+Large spreads in low-volume markets may hide inefficiencies for contrarian strategies.
