@@ -1,0 +1,3 @@
+Polymarket aggregates real-time beliefs across thousands of participants. We highlight liquidity, spread, and resolution windows to help you triage where attention is most rewarded.
+
+Overlooked markets are often near 50%, have moderate but rising flow, and tighter-than-usual spreads after rounding. These can be mispriced or under-discussed opportunities.
