@@ -54,8 +54,9 @@ def resolve_csv_path_from_cli_or_latest() -> Path:
     return sample.resolve()
 
 def main():
-    csv_path = resolve_csv_path_from_cli_or_latest()
+    csv_path = resolve_csv_path_from_cli_or_latest()  # uses sys.argv[1] if provided
     print(f"[builder] Using CSV: {csv_path}")
+
   
 # =========================
 # Config
