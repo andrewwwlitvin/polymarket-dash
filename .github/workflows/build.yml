@@ -11,9 +11,11 @@ permissions:
 jobs:
   build:
     runs-on: ubuntu-latest
+    timeout-minutes: 25      # optional: cap the entire job
     concurrency:
       group: deploy-${{ github.ref }}
       cancel-in-progress: false
+      
     env:
       TZ: Europe/Lisbon
 
@@ -32,15 +34,21 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
-
-      # === Fetch newest CSV ===
-     - name: Fetch latest markets (fast top-k)
+          
+      - name: Fetch latest markets (fast top-k)
         timeout-minutes: 15                # cap this step
         env:
           PYTHONUNBUFFERED: "1"           # live logs from Python
         run: |
           set -e
           mkdir -p data
+          # If CI_PRESET=1 and your script supports it, lower topk automatically
+          python -u scripts/polymarket_enriched_fast.py \
+            --topk 100 \
+            --concurrency 8 \
+            --verbose
+          latest=$(ls -1t polymarket_enriched_fast_*.csv 2>/dev/null | head -n1 || true)
+          [ -n "$latest" ] && mv "$latest" "data/$latest"
 
           # 1) Reuse a fresh CSV if one was generated in the last 5 hours (300 min)
           recent=$(find data -maxdepth 1 -type f -name 'polymarket_enriched_fast_*.csv' -mmin -300 | sort | tail -n1 || true)
