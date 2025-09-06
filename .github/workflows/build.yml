@@ -34,16 +34,40 @@ jobs:
           if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
 
       # === Fetch newest CSV ===
-      - name: Fetch latest markets (fast top-k)
+     - name: Fetch latest markets (fast top-k)
+        timeout-minutes: 15                # cap this step
+        env:
+          PYTHONUNBUFFERED: "1"           # live logs from Python
         run: |
+          set -e
           mkdir -p data
-          if [ -f scripts/polymarket_enriched_fast.py ]; then
-            python scripts/polymarket_enriched_fast.py --topk 120 --concurrency 8
-            latest=$(ls -1t polymarket_enriched_fast_*.csv | head -n1)
-            [ -n "$latest" ] && mv "$latest" "data/$latest"
+
+          # 1) Reuse a fresh CSV if one was generated in the last 5 hours (300 min)
+          recent=$(find data -maxdepth 1 -type f -name 'polymarket_enriched_fast_*.csv' -mmin -300 | sort | tail -n1 || true)
+          if [ -n "$recent" ]; then
+            echo "Using recent CSV: $recent"
           else
-            echo "Fetcher not found; using existing CSV in data/ or sample fallback."
+            echo "No recent CSV found; fetching a new one."
+
+            # 2) Use a smaller scope on CI and be verbose; unbuffered for live logs
+            #    (tune --topk/--concurrency to your taste; 120/8 is usually fine)
+            python -u scripts/polymarket_enriched_fast.py \
+              --topk 120 \
+              --concurrency 8 \
+              --verbose || { echo "Fetcher failed"; exit 1; }
+
+            latest=$(ls -1t polymarket_enriched_fast_*.csv 2>/dev/null | head -n1 || true)
+            if [ -n "$latest" ]; then
+              mv "$latest" "data/$latest"
+              recent="data/$latest"
+              echo "Fetched CSV: $recent"
+            else
+              echo "No CSV produced by fetcher; will rely on previous or sample."
+            fi
           fi
+
+          # 3) List what we have for visibility
+          ls -lh data | sed 's/^/data: /'
 
       - name: Generate site
         run: |
