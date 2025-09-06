@@ -41,48 +41,64 @@ jobs:
           PYTHONUNBUFFERED: "1"
         run: |
           set -euo pipefail
-          mkdir -p data
 
-          # Try to reuse a CSV from last 5 hours (if present)
-          recent=$(find data -maxdepth 1 -type f -name 'polymarket_enriched_fast_*.csv' -mmin -300 | sort | tail -n1 || true)
+          echo "GITHUB_WORKSPACE=$GITHUB_WORKSPACE"
+          WORKDIR="$GITHUB_WORKSPACE"
+          DATA_DIR="$WORKDIR/data"
+          mkdir -p "$DATA_DIR"
+
+          # Reuse CSV if <5h old
+          recent=$(find "$DATA_DIR" -maxdepth 1 -type f -name 'polymarket_enriched_fast_*.csv' -mmin -300 | sort | tail -n1 || true)
           if [ -n "${recent:-}" ]; then
             echo "Using recent CSV: $recent"
             echo "LATEST_CSV=$recent" >> "$GITHUB_ENV"
           else
             echo "No recent CSV; fetching a new one…"
-            python -u scripts/polymarket_enriched_fast.py \
+            python -u "$WORKDIR/scripts/polymarket_enriched_fast.py" \
               --topk 120 \
               --concurrency 8 \
               --fast
 
-            # Find newest file that matches the expected pattern
-            latest=$(ls -1t polymarket_enriched_fast_*.csv 2>/dev/null | head -n1 || true)
+            echo "Search for new CSVs (top-level and scripts/):"
+            find "$WORKDIR" -maxdepth 2 -type f -name 'polymarket_enriched_fast_*.csv' -printf '%TY-%Tm-%Td %TH:%TM %p\n' | sort || true
+
+            latest=$(find "$WORKDIR" -maxdepth 2 -type f -name 'polymarket_enriched_fast_*.csv' | sort | tail -n1 || true)
             if [ -z "${latest:-}" ]; then
               echo "ERROR: Fetcher did not produce a CSV named polymarket_enriched_fast_*.csv"
-              echo "Here are files in the workspace for debugging:"
-              ls -lAh || true
               exit 1
             fi
 
-            # Move into data/ and export env var
-            mv "$latest" "data/$latest"
-            echo "Fetched CSV: data/$latest"
-            echo "LATEST_CSV=data/$latest" >> "$GITHUB_ENV"
+            base=$(basename "$latest")
+            mv "$latest" "$DATA_DIR/$base"
+            echo "Fetched CSV: $DATA_DIR/$base"
+            echo "LATEST_CSV=$DATA_DIR/$base" >> "$GITHUB_ENV"
           fi
 
-          echo "Listing data/:"
-          ls -lAh data || true
-
+          echo "List data dir:"
+          ls -lAh "$DATA_DIR" || true
+          
       - name: Generate site (use explicit CSV)
         run: |
           set -euo pipefail
+          echo "GITHUB_WORKSPACE=$GITHUB_WORKSPACE"
+          echo "LATEST_CSV env: ${LATEST_CSV:-<empty>}"
+
           if [ -z "${LATEST_CSV:-}" ]; then
             echo "ERROR: LATEST_CSV is not set; aborting to avoid publishing sample data."
             exit 1
           fi
-          echo "Building site from $LATEST_CSV"
-          python scripts/build_site_from_csv.py "$LATEST_CSV"
+          if [ ! -f "$LATEST_CSV" ]; then
+            echo "ERROR: LATEST_CSV path does not exist: $LATEST_CSV"
+            echo "Directory listing of $(dirname "$LATEST_CSV"):"
+            ls -lAh "$(dirname "$LATEST_CSV")" || true
+            exit 1
+          fi
 
+          echo "Building site from: $LATEST_CSV"
+          head -n 2 "$LATEST_CSV" | sed 's/^/[csv head] /' || true
+
+          python "$GITHUB_WORKSPACE/scripts/build_site_from_csv.py" "$LATEST_CSV"
+          
       - name: Configure Git
         run: |
           git config --global --add safe.directory "$GITHUB_WORKSPACE"
