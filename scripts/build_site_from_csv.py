@@ -27,6 +27,12 @@ import sys, csv, math, re, html as html_lib, json, random
 from pathlib import Path
 from datetime import datetime
 
+import os
+# hard-stop in CI if no CSV path is provided
+if os.environ.get("GITHUB_ACTIONS") and len(sys.argv) <= 1:
+    print("[builder] ERROR: In CI you must pass a CSV path, e.g. build_site_from_csv.py /path/to.csv", flush=True)
+    raise SystemExit(2)
+
 # --- CLI CSV resolver ---
 def resolve_csv_path_from_cli_or_latest() -> Path:
     if len(sys.argv) > 1:
