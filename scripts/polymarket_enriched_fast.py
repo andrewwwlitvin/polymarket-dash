@@ -7,7 +7,7 @@ What it does
 ------------
 1) Fetch ALL open markets from Gamma (cheap).
 2) PRE-RANK cheaply (lifetime volume + time proximity).
-3) Select TOP-K (default 200).
+3) Select TOP-K (default 120).
 4) For TOP-K only (concurrent):
      - Fetch quotes via resilient endpoints (id-first + slug fallback).
        * Expanded parser handles orderBook/book, nested outcome quote/book, flat fields.
@@ -32,7 +32,7 @@ RETRIES = 3
 SLEEP = 0.08
 PAGE_SIZE = 200
 
-TOPK_DEFAULT = 200
+TOPK_DEFAULT = 120
 CONCURRENCY_DEFAULT = 8
 
 def timestamp_tag():
