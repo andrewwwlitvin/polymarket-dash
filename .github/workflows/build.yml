@@ -38,36 +38,50 @@ jobs:
       - name: Fetch latest markets (fast top-k)
         timeout-minutes: 15
         env:
-          PYTHONUNBUFFERED: "1"     # unbuffered logs for live output
+          PYTHONUNBUFFERED: "1"
         run: |
-          set -e
+          set -euo pipefail
           mkdir -p data
 
-          # Reuse a recent CSV if available (<5h old)
+          # Try to reuse a CSV from last 5 hours (if present)
           recent=$(find data -maxdepth 1 -type f -name 'polymarket_enriched_fast_*.csv' -mmin -300 | sort | tail -n1 || true)
-          if [ -n "$recent" ]; then
+          if [ -n "${recent:-}" ]; then
             echo "Using recent CSV: $recent"
+            echo "LATEST_CSV=$recent" >> "$GITHUB_ENV"
           else
-            echo "No recent CSV found; fetching a new one."
+            echo "No recent CSV; fetching a new one…"
             python -u scripts/polymarket_enriched_fast.py \
               --topk 120 \
               --concurrency 8 \
               --fast
+
+            # Find newest file that matches the expected pattern
             latest=$(ls -1t polymarket_enriched_fast_*.csv 2>/dev/null | head -n1 || true)
-            if [ -n "$latest" ]; then
-              mv "$latest" "data/$latest"
-              echo "Fetched CSV: data/$latest"
-            else
-              echo "No CSV produced by fetcher; will rely on previous or sample."
+            if [ -z "${latest:-}" ]; then
+              echo "ERROR: Fetcher did not produce a CSV named polymarket_enriched_fast_*.csv"
+              echo "Here are files in the workspace for debugging:"
+              ls -lAh || true
+              exit 1
             fi
+
+            # Move into data/ and export env var
+            mv "$latest" "data/$latest"
+            echo "Fetched CSV: data/$latest"
+            echo "LATEST_CSV=data/$latest" >> "$GITHUB_ENV"
           fi
 
-          # List what we have
-          ls -lh data | sed 's/^/data: /'
+          echo "Listing data/:"
+          ls -lAh data || true
 
-      - name: Generate site
+      - name: Generate site (use explicit CSV)
         run: |
-          python scripts/build_site_from_csv.py
+          set -euo pipefail
+          if [ -z "${LATEST_CSV:-}" ]; then
+            echo "ERROR: LATEST_CSV is not set; aborting to avoid publishing sample data."
+            exit 1
+          fi
+          echo "Building site from $LATEST_CSV"
+          python scripts/build_site_from_csv.py "$LATEST_CSV"
 
       - name: Configure Git
         run: |
