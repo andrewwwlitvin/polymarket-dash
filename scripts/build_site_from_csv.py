@@ -405,8 +405,8 @@ def main():
     # 2) Write Home (Back only → latest snapshot), with THIS run's (latest) description
     home_title = "Hottest Markets & Overlooked Chances on Polymarket Today"
     home_sub   = f"{d_human} • {t_human}"
-    home_header_nav = nav_block(forward_href=None, back_href=latest_snapshot)
-    home_footer_nav = nav_block(forward_href=None, back_href=latest_snapshot)
+    home_header_nav = nav_block(forward_href=latest_snapshot, back_href=None)
+    home_footer_nav = nav_block(forward_href=latest_snapshot, back_href=None)
     home_html = build_dashboard_html(
         home_title, home_sub, hot_rows, gem_rows,
         home_header_nav, home_footer_nav, sysline,
@@ -414,7 +414,7 @@ def main():
     )
     (out_dir / "index.html").write_text(home_html, encoding="utf-8")
 
-    # 3) Write Archive (Back only → latest snapshot), with THIS run's (latest) description
+    # 3) Write Archive (Forward only → latest snapshot), with THIS run's (latest) description
     snaps = sorted(out_dir.glob("dashboard_*.html"), key=snap_key, reverse=True)
     items = []
     for p in snaps:
@@ -425,8 +425,8 @@ def main():
         items.append(f'<li><a href="{p.name}">{html_lib.escape(label)}</a></li>')
     archive_list = "<ul class='archive-list'>" + ("\n".join(items) if items else "<li>No snapshots yet.</li>") + "</ul>"
 
-    archive_header_nav = nav_block(forward_href=None, back_href=latest_snapshot)
-    archive_footer_nav = nav_block(forward_href=None, back_href=latest_snapshot)
+    archive_header_nav = nav_block(forward_href=latest_snapshot, back_href=None)
+    archive_footer_nav = nav_block(forward_href=latest_snapshot, back_href=None)
     archive_html = f"""<!doctype html>
 <html lang="en">
 <head>
