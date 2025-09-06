@@ -405,8 +405,8 @@ def main():
     # 2) Write Home (Back only → latest snapshot), with THIS run's (latest) description
     home_title = "Hottest Markets & Overlooked Chances on Polymarket Today"
     home_sub   = f"{d_human} • {t_human}"
-    home_header_nav = nav_block(forward_href=latest_snapshot, back_href=None)
-    home_footer_nav = nav_block(forward_href=latest_snapshot, back_href=None)
+    home_header_nav = nav_block(forward_href=None, back_href=latest_snapshot)
+    home_footer_nav = nav_block(forward_href=None, back_href=latest_snapshot)
     home_html = build_dashboard_html(
         home_title, home_sub, hot_rows, gem_rows,
         home_header_nav, home_footer_nav, sysline,
