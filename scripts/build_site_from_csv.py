@@ -27,13 +27,8 @@ import sys, csv, math, re, html as html_lib, json, random
 from pathlib import Path
 from datetime import datetime
 
-# --- CLI CSV resolver ---------------------------------------------------------
+# --- CLI CSV resolver ---
 def resolve_csv_path_from_cli_or_latest() -> Path:
-    """
-    If a path is provided as the first CLI arg, use it (and error if missing).
-    Otherwise, pick the newest CSV from data/, or create a small sample.
-    """
-    # 1) CLI argument wins
     if len(sys.argv) > 1:
         p = Path(sys.argv[1]).resolve()
         print(f"[builder] CLI CSV arg detected: {p}")
@@ -41,35 +36,27 @@ def resolve_csv_path_from_cli_or_latest() -> Path:
             print(f"[error] CSV not found at CLI path: {p}", file=sys.stderr)
             sys.exit(2)
         return p
-
-    # 2) Fallback: newest in data/
-    data_dir = Path("data")
-    data_dir.mkdir(exist_ok=True)
+    data_dir = Path("data"); data_dir.mkdir(exist_ok=True)
     csvs = sorted(data_dir.glob("*.csv"))
     if csvs:
         chosen = csvs[-1].resolve()
         print(f"[builder] No CLI arg. Using newest in data/: {chosen}")
         return chosen
-
-    # 3) Last resort: create a tiny sample so the site still builds
+    # (optional) write sample if nothing exists
     sample = data_dir / "sample_enriched_20250101_000000.csv"
     if not sample.exists():
         with sample.open("w", encoding="utf-8", newline="") as f:
             w = csv.writer(f)
             w.writerow(["question","why","embedSrc","volume24h","avgSpread","timeToResolveDays","momentumPct24h","near50Flag","underround"])
-            w.writerow([
-                "Will Bitcoin hit $100k by 2025?","Crypto trend",
-                "https://embed.polymarket.com/market.html?market=bitcoin-100k&features=volume&theme=light",
-                250000,0.04,120,2.5,1,-0.02
-            ])
-            w.writerow([
-                "Will Trump win 2024 election?","Politics",
-                "https://embed.polymarket.com/market.html?market=trump-2024&features=volume&theme=light",
-                450000,0.03,60,1.2,0.8,-0.01
-            ])
+            w.writerow(["Will Bitcoin hit $100k by 2025?","Crypto trend","https://embed.polymarket.com/market.html?market=bitcoin-100k&features=volume&theme=light",250000,0.04,120,2.5,1,-0.02])
+            w.writerow(["Will Trump win 2024 election?","Politics","https://embed.polymarket.com/market.html?market=trump-2024&features=volume&theme=light",450000,0.03,60,1.2,0.8,-0.01])
     print(f"[builder] No CSVs found. Wrote sample: {sample.resolve()}")
     return sample.resolve()
 
+def main():
+    csv_path = resolve_csv_path_from_cli_or_latest()
+    print(f"[builder] Using CSV: {csv_path}")
+  
 # =========================
 # Config
 # =========================
