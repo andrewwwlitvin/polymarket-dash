@@ -1,0 +1,6 @@
+- name: Fetch latest markets (fast top-k)
+  run: |
+    mkdir -p data
+    python scripts/polymarket_enriched_fast.py --topk 120 --concurrency 8
+    latest=$(ls -1t polymarket_enriched_fast_*.csv | head -n1)
+    mv "$latest" "data/$latest"
