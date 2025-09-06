@@ -3,30 +3,70 @@ name: Build and publish dashboards
 on:
   schedule:
     - cron: "0 */6 * * *"     # every 6 hours (UTC)
-  workflow_dispatch:          # allow manual run from the Actions tab
+  workflow_dispatch:          # allow manual run
+
+permissions:
+  contents: write
 
 jobs:
   build:
     runs-on: ubuntu-latest
+    concurrency:
+      group: deploy-${{ github.ref }}
+      cancel-in-progress: false
     env:
-      TZ: Europe/Lisbon       # show Lisbon time on pages
+      TZ: Europe/Lisbon       # << set your preferred timezone for page timestamps
+
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
 
-      - name: Generate site from newest CSV (or sample)
+      - name: Install deps
+        run: |
+          python -m pip install --upgrade pip
+          if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
+
+      # === Fetch latest market CSV (YOUR real fetcher) ===
+      # Adjust command/flags to your script’s interface.
+      - name: Fetch latest markets (fast top-k)
+        run: |
+          mkdir -p data
+          python scripts/polymarket_enriched_fast.py --topk 120 --concurrency 8
+          latest=$(ls -1t polymarket_enriched_fast_*.csv | head -n1)
+          echo "Latest CSV: $latest"
+          # Move into /data so the site builder auto-detects it as the newest
+          mv "$latest" "data/$latest"
+
+      # === Build site from newest CSV (or sample if none present) ===
+      - name: Generate site
         run: |
           python scripts/build_site_from_csv.py
 
+      - name: Configure Git
+        run: |
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
       - name: Commit and push artifacts
         run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add site/ data/
-          git commit -m "Auto-build site $(date -u +'%Y-%m-%d %H:%M:%S')" || echo "Nothing to commit"
-          git push
+          set -e
+          git add -A
+          if git diff --cached --quiet; then
+            echo "Nothing to commit"; exit 0
+          fi
+          git pull --rebase --autostash origin "$GITHUB_REF_NAME" || true
+          if git push origin HEAD:"$GITHUB_REF_NAME"; then
+            echo "Push ok"
+          else
+            echo "Push failed; retrying after rebase"
+            git pull --rebase --autostash origin "$GITHUB_REF_NAME" || true
+            git push origin HEAD:"$GITHUB_REF_NAME"
+          fi
