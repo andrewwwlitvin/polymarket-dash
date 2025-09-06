@@ -1,7 +1,0 @@
-      - name: Fetch latest markets (fast top-k)
-        run: |
-          mkdir -p data
-          python scripts/polymarket_fast_enriched.py --fast --topk 200 --concurrency 8
-          # Move newest CSV into /data so the generator picks it up
-          latest_csv=$(ls -1t polymarket_enriched_fast_*.csv | head -n1)
-          mv "$latest_csv" "data/$latest_csv"
