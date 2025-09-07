@@ -4,7 +4,7 @@
 import sys, csv, re, json, random, time, html as html_lib
 from pathlib import Path
 from datetime import datetime, timezone
-from typing import Tuple, List, Dict, Optional
+from typing import Tuple, List, Dict, Optional, Any
 
 # =========================
 # Config
@@ -16,7 +16,7 @@ LONG_DIR        = Path("content/long")   # long HTML (visible)
 DESC_HISTORY    = Path("data/desc_history.json")
 RECENT_WINDOW   = 30
 SITE_BASE       = "https://urbanpoly.com"   # change if needed
-STAMP_FMT       = "%Y-%m-%d_%H%M%S"          # seconds to avoid collisions
+STAMP_FMT       = "%Y-%m-%d_%H%M%S"          # include seconds
 
 # =========================
 # CSV helpers
@@ -37,7 +37,7 @@ def resolve_csv_path() -> Path:
         print(f"[builder] Using newest in data/: {chosen}")
         return chosen
 
-    # minimal sample
+    # minimal sample if nothing found
     sample = DATA_DIR / "sample_enriched_20250101_000000.csv"
     if not sample.exists():
         with sample.open("w", encoding="utf-8", newline="") as f:
@@ -61,8 +61,8 @@ def resolve_csv_path() -> Path:
     print(f"[builder] No CSVs found. Wrote sample: {sample.resolve()}")
     return sample.resolve()
 
-def read_rows(csv_path: Path) -> List[Dict]:
-    out: List[Dict] = []
+def read_rows(csv_path: Path) -> List[Dict[str, Any]]:
+    out: List[Dict[str, Any]] = []
     with csv_path.open("r", encoding="utf-8", newline="") as f:
         reader = csv.DictReader(f)
         for r in reader:
@@ -90,7 +90,7 @@ def ttr_badge(days_str: Optional[str]) -> str:
     if d <= 0: return "TTR Ended"
     return f"TTR {d:.1f}d"
 
-def pick_hot_and_gems(rows: List[Dict], k: int = 12):
+def pick_hot_and_gems(rows: List[Dict[str, Any]], k: int = 12):
     enriched = []
     for r in rows:
         vol = num(r.get("volume24h")) or num(r.get("volume")) or 0.0
@@ -119,19 +119,36 @@ def rollover_previous_index_to_snapshot(site_dir: Path) -> Optional[str]:
     return snap.name
 
 # =========================
-# Description rotation
+# Description rotation (robust to old history formats)
 # =========================
 def _list_files(dirpath: Path, exts: Tuple[str, ...]) -> List[Path]:
     if not dirpath.exists(): return []
     return sorted([p for p in dirpath.iterdir() if p.is_file() and p.suffix.lower() in exts])
 
-def _load_history() -> dict:
+def _load_history() -> Dict[str, List[str]]:
+    """
+    Returns a dict with keys 'meta_recent' and 'long_recent'.
+    If the on-disk JSON is an old list format or invalid, normalize it.
+    """
+    default_hist: Dict[str, List[str]] = {"meta_recent": [], "long_recent": []}
     if DESC_HISTORY.exists():
-        try: return json.loads(DESC_HISTORY.read_text(encoding="utf-8"))
-        except Exception: pass
-    return {"meta_recent": [], "long_recent": []}
+        try:
+            data = json.loads(DESC_HISTORY.read_text(encoding="utf-8"))
+            # Old format: a list of names -> convert into meta_recent only
+            if isinstance(data, list):
+                return {"meta_recent": list(map(str, data))[:RECENT_WINDOW], "long_recent": []}
+            if isinstance(data, dict):
+                # ensure keys exist and are lists
+                meta_recent = data.get("meta_recent", [])
+                long_recent = data.get("long_recent", [])
+                if not isinstance(meta_recent, list): meta_recent = []
+                if not isinstance(long_recent, list): long_recent = []
+                return {"meta_recent": meta_recent[:RECENT_WINDOW], "long_recent": long_recent[:RECENT_WINDOW]}
+        except Exception:
+            pass
+    return default_hist
 
-def _save_history(h: dict):
+def _save_history(h: Dict[str, List[str]]):
     DESC_HISTORY.parent.mkdir(parents=True, exist_ok=True)
     DESC_HISTORY.write_text(json.dumps(h, ensure_ascii=False, indent=2), encoding="utf-8")
 
@@ -150,16 +167,21 @@ def choose_descriptions() -> tuple[str, str, str, str]:
     long_files = _list_files(LONG_DIR, (".html", ".htm", ".txt"))
     hist = _load_history()
 
-    meta_pick = _pick_without_recent(meta_files, hist.get("meta_recent", []))
+    meta_recent = list(hist.get("meta_recent", []))
+    long_recent = list(hist.get("long_recent", []))
+
+    meta_pick = _pick_without_recent(meta_files, meta_recent)
     if meta_pick:
         raw = meta_pick.read_text(encoding="utf-8")
-        meta_text = _strip_html(" ".join(raw.split()))[:160]
+        # collapse whitespace, limit 160
+        cleaned = " ".join(raw.split())
+        meta_text = _strip_html(cleaned)[:160]
         meta_name = meta_pick.name
     else:
         meta_text = "Live Polymarket dashboards—hottest markets & overlooked chances. Updated every 6 hours."
         meta_name = "(default)"
 
-    long_pick = _pick_without_recent(long_files, hist.get("long_recent", []))
+    long_pick = _pick_without_recent(long_files, long_recent)
     if long_pick:
         long_html = long_pick.read_text(encoding="utf-8")
         long_name = long_pick.name
@@ -170,15 +192,15 @@ def choose_descriptions() -> tuple[str, str, str, str]:
         )
         long_name = "(default)"
 
-    def upd(key: str, name: str):
-        arr = list(hist.get(key, []))
-        if name != "(default)":
-            arr = [name] + [n for n in arr if n != name]
-            hist[key] = arr[:RECENT_WINDOW]
-    upd("meta_recent", meta_name)
-    upd("long_recent", long_name)
-    _save_history(hist)
+    # update recency lists
+    if meta_name != "(default)":
+        meta_recent = [meta_name] + [n for n in meta_recent if n != meta_name]
+        meta_recent = meta_recent[:RECENT_WINDOW]
+    if long_name != "(default)":
+        long_recent = [long_name] + [n for n in long_recent if n != long_name]
+        long_recent = long_recent[:RECENT_WINDOW]
 
+    _save_history({"meta_recent": meta_recent, "long_recent": long_recent})
     return meta_text, long_html, meta_name, long_name
 
 # =========================
@@ -237,7 +259,7 @@ body {{ margin:0; font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI
 </style>
 </head>"""
 
-def market_card(row: Dict) -> str:
+def market_card(row: Dict[str, Any]) -> str:
     title = row.get("question") or "(Untitled market)"
     why   = row.get("why") or (row.get("category") or "—")
     embed = row.get("embedSrc") or ""
@@ -268,8 +290,7 @@ def market_card(row: Dict) -> str:
 </div>
 """.strip()
 
-def section(title: str, rows: List[Dict]) -> str:
-    # Precompute inner HTML to avoid backslashes in f-string expression
+def section(title: str, rows: List[Dict[str, Any]]) -> str:
     cards_html = "\n".join(market_card(r) for r in rows)
     return (
         "<div class=\"section\">"
@@ -283,7 +304,7 @@ def section(title: str, rows: List[Dict]) -> str:
 # =========================
 # Pages (nav rules + Home/Archive buttons)
 # =========================
-def render_index(now_text: str, build_ts: str, hot: List[Dict], gems: List[Dict],
+def render_index(now_text: str, build_ts: str, hot: List[Dict[str, Any]], gems: List[Dict[str, Any]],
                  meta_desc: str, long_html: str, newest_snapshot: Optional[str]) -> str:
     title = f"Hottest Markets & Overlooked Chances on Polymarket Today — {now_text}"
     page_url = f"{SITE_BASE}/index.html"
@@ -291,7 +312,6 @@ def render_index(now_text: str, build_ts: str, hot: List[Dict], gems: List[Dict]
     nonce = str(int(time.time()))
     head = html_head(title, page_url, meta_desc, iso_now, build_ts, nonce)
 
-    # Home: show only Archive button; Back → previous snapshot
     home_arch = '<a class="btn" href="archive.html">Archive</a>'
     back_btn  = f'<a class="btn" href="{html_lib.escape(newest_snapshot)}">Back →</a>' if newest_snapshot else ""
 
@@ -347,7 +367,6 @@ def render_archive(now_text: str, build_ts: str, snapshots: List[str]) -> str:
     nonce = str(int(time.time()))
     head = html_head(title, page_url, desc, iso_now, build_ts, nonce)
 
-    # Archive: show Home button; Forward → oldest snapshot
     home_btn = '<a class="btn" href="index.html">Home</a>'
     oldest = snapshots[-1] if snapshots else None
     fwd_btn = f'<a class="btn" href="{html_lib.escape(oldest)}">← Forward</a>' if oldest else ""
@@ -395,7 +414,7 @@ def render_archive(now_text: str, build_ts: str, snapshots: List[str]) -> str:
 # =========================
 # SEO assets
 # =========================
-def write_sitemap_xml(site_dir: Path, site_base: str, pages: List[Dict]):
+def write_sitemap_xml(site_dir: Path, site_base: str, pages: List[Dict[str, str]]):
     out = site_dir / "sitemap.xml"
     lines = [
         '<?xml version="1.0" encoding="UTF-8"?>',
@@ -404,8 +423,9 @@ def write_sitemap_xml(site_dir: Path, site_base: str, pages: List[Dict]):
     for p in pages:
         lines.append("  <url>")
         lines.append(f"    <loc>{p['loc']}</loc>")
-        if p.get("lastmod"):
-            lines.append(f"    <lastmod>{p['lastmod']}</lastmod>")
+        lastmod = p.get("lastmod", "")
+        if lastmod:
+            lines.append(f"    <lastmod>{lastmod}</lastmod>")
         lines.append("  </url>")
     lines.append("</urlset>")
     out.write_text("\n".join(lines), encoding="utf-8")
@@ -463,11 +483,11 @@ def main():
     snapshots = sorted([p.name for p in SITE_DIR.glob("dashboard_*.html")], reverse=True)
     newest_snap = snapshots[0] if snapshots else None
 
-    # 2) choose descriptions
+    # 2) choose descriptions (robust)
     meta_desc, long_html, meta_name, long_name = choose_descriptions()
     print(f"[builder] Using meta={meta_name}, long={long_name}")
 
-    # 3) render pages (guaranteed-diff via nonce + seconds stamp)
+    # 3) render pages
     now = datetime.now(timezone.utc)
     build_ts = now.strftime(STAMP_FMT)        # seconds
     now_text = now.astimezone().strftime("%d %B %Y • %H:%M")
