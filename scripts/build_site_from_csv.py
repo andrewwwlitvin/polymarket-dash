@@ -1,521 +1,564 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
-import sys, csv, re, json, random, time, html as html_lib
+"""
+Builds static HTML pages from the latest enriched CSV.
+
+Implements UX/SEO fixes (Steps 1–10):
+- Consistent header/footer nav, per-page rules (index/archive/snapshot)
+- Tabs label = "Overlooked" and switching works
+- Remove duplicate plain "why" line; keep stat boxes only
+- Muted, small embed captions; link not blue
+- Remove "HOT (Top 12) / Overlooked (Top 12)" headings on index
+- Archive gains rotating description (like index). Snapshots freeze description at publish time
+- All times show "UTC"; og:updated_time in ISO UTC
+- Snapshot titles drop "Today"; index keeps it
+
+Inputs:
+- CSV path as argv[1], or auto-pick newest in data/
+- content/meta/*.txt (short description pool)
+- content/long/*.html (long description pool)
+- data/desc_history.json (to avoid repeats)
+
+Outputs:
+- site/index.html
+- site/dashboard_YYYY-MM-DD_HHMM.html (snapshot)
+- site/archive.html
+- site/robots.txt
+- site/sitemap.xml
+- data/desc_history.json (updated)
+"""
+
+import sys, csv, math, re, html as html_lib, json, random
 from pathlib import Path
 from datetime import datetime, timezone
-from typing import Tuple, List, Dict, Optional, Any
 
-# =========================
-# Config
-# =========================
-SITE_DIR        = Path("site")
-DATA_DIR        = Path("data")
-META_DIR        = Path("content/meta")   # short, plain-text (<=160 chars)
-LONG_DIR        = Path("content/long")   # long HTML (visible)
-DESC_HISTORY    = Path("data/desc_history.json")
-RECENT_WINDOW   = 30
-SITE_BASE       = "https://urbanpoly.com"   # change if needed
-STAMP_FMT       = "%Y-%m-%d_%H%M%S"          # include seconds
+ROOT = Path(__file__).resolve().parents[1]
+DATA_DIR = ROOT / "data"
+CONTENT_DIR = ROOT / "content"
+SITE_DIR = ROOT / "site"
 
-# =========================
-# CSV helpers
-# =========================
-def resolve_csv_path() -> Path:
-    if len(sys.argv) > 1 and sys.argv[1]:
-        p = Path(sys.argv[1]).resolve()
-        print(f"[builder] CLI CSV arg detected: {p}")
-        if not p.exists():
-            print(f"[error] CSV not found: {p}", file=sys.stderr)
-            sys.exit(2)
-        return p
+META_DIR = CONTENT_DIR / "meta"
+LONG_DIR = CONTENT_DIR / "long"
 
-    DATA_DIR.mkdir(exist_ok=True)
-    csvs = sorted(DATA_DIR.glob("*.csv"))
-    if csvs:
-        chosen = csvs[-1].resolve()
-        print(f"[builder] Using newest in data/: {chosen}")
-        return chosen
+HISTORY_PATH = DATA_DIR / "desc_history.json"
 
-    # minimal sample if nothing found
-    sample = DATA_DIR / "sample_enriched_20250101_000000.csv"
-    if not sample.exists():
-        with sample.open("w", encoding="utf-8", newline="") as f:
-            w = csv.writer(f)
-            w.writerow([
-                "id","slug","url","embedSrc","question","category","why",
-                "volume","volume24h","trades24h","uniqueTraders24h",
-                "momentumDelta24h","momentumPct24h","endDateISO","timeToResolveDays",
-                "outcomeCount","avgSpread","underround","binaryMidYes","near50Flag",
-                "bestQuotesJSON","avgSpreadProxy"
-            ])
-            w.writerow([
-                "1","bitcoin-100k","https://polymarket.com/event/bitcoin-100k",
-                "https://embed.polymarket.com/market.html?market=bitcoin-100k&features=volume&theme=light",
-                "Will Bitcoin hit $100k by 2025?","Crypto",
-                "Strong 24h activity; near resolution.","1000000","250000","1200","800",
-                "0.15","15.0","2025-12-31T00:00:00Z","120",
-                "2","0.020","-0.010","0.48","1",
-                '[{"name":"Top","bestBid":0.48,"bestAsk":0.52}]',"0.02"
-            ])
-    print(f"[builder] No CSVs found. Wrote sample: {sample.resolve()}")
-    return sample.resolve()
+# -----------------------
+# Helpers
+# -----------------------
+def utc_now():
+    return datetime.now(timezone.utc)
 
-def read_rows(csv_path: Path) -> List[Dict[str, Any]]:
-    out: List[Dict[str, Any]] = []
-    with csv_path.open("r", encoding="utf-8", newline="") as f:
-        reader = csv.DictReader(f)
-        for r in reader:
-            out.append({k: v for k, v in r.items()})
-    return out
+def ts_for_snapshot(dt: datetime) -> str:
+    # dashboard_YYYY-MM-DD_HHMM.html
+    return dt.strftime("dashboard_%Y-%m-%d_%H%M.html")
 
-def num(v, default=None):
+def human_date(dt: datetime) -> str:
+    return dt.strftime("%d %B %Y • %H:%M UTC")
+
+def iso_og_time(dt: datetime) -> str:
+    return dt.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+def newest_csv_in_data() -> Path | None:
+    csvs = list(DATA_DIR.glob("polymarket_enriched_fast_*.csv"))
+    if not csvs:
+        return None
+    return sorted(csvs, key=lambda p: p.stat().st_mtime, reverse=True)[0]
+
+def read_csv_rows(csv_path: Path) -> list[dict]:
+    with csv_path.open("r", encoding="utf-8") as f:
+        r = csv.DictReader(f)
+        return [dict(row) for row in r]
+
+def escape(s: str) -> str:
+    return html_lib.escape(s, quote=True)
+
+def load_history():
+    if HISTORY_PATH.exists():
+        try:
+            return json.loads(HISTORY_PATH.read_text(encoding="utf-8"))
+        except Exception:
+            return {"recent_meta": [], "recent_long": []}
+    return {"recent_meta": [], "recent_long": []}
+
+def save_history(hist):
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    HISTORY_PATH.write_text(json.dumps(hist, ensure_ascii=False, indent=2), encoding="utf-8")
+
+def choose_rotating_file(pool: list[Path], recent: list[str], keep: int = 30) -> Path | None:
+    if not pool:
+        return None
+    # Prefer those not in recent
+    candidates = [p for p in pool if p.name not in recent]
+    pick = random.choice(candidates or pool)
+    # update recent (append and cap)
+    recent.append(pick.name)
+    while len(recent) > keep:
+        recent.pop(0)
+    return pick
+
+def parse_money(n: str | None) -> str:
     try:
-        if v is None or v == "": return default
-        return float(v)
-    except Exception:
-        return default
-
-def fmt_money(n) -> str:
-    if n is None: return "—"
-    try:
-        return f"${int(round(float(n))):,}"
+        x = float(n) if n not in (None, "") else 0.0
+        return f"${int(round(x)):,}"
     except Exception:
         return "—"
 
-def ttr_badge(days_str: Optional[str]) -> str:
-    if not days_str: return "TTR —"
-    d = num(days_str)
-    if d is None: return "TTR —"
-    if d <= 0: return "TTR Ended"
-    return f"TTR {d:.1f}d"
+def caption_text(question: str, url: str) -> str:
+    # Smaller muted caption; link inherits color; not blue
+    return (
+        f"<p class='embed-caption'>"
+        f"{escape(question)} — "
+        f"<a href='{escape(url)}' target='_blank' rel='noopener'>View on Polymarket</a>"
+        f"</p>"
+    )
 
-def pick_hot_and_gems(rows: List[Dict[str, Any]], k: int = 12):
-    enriched = []
-    for r in rows:
-        vol = num(r.get("volume24h")) or num(r.get("volume")) or 0.0
-        ttr = num(r.get("timeToResolveDays"), 99999.0)
-        under = num(r.get("underround"), 0.0)
-        near50 = num(r.get("near50Flag"), 0.0)
-        enriched.append((vol, ttr, -under, near50, r))
-    hot = [r for _, __, ___, ____, r in sorted(enriched, key=lambda x: (-x[0], x[1]))[:k]]
-    pool = [e for e in enriched if 1_000 <= e[0] <= 100_000]
-    gems = [r for _, __, ___, ____, r in sorted(pool, key=lambda x: (-x[3], x[2], x[1]))[:k]]
-    return hot, gems
+def ttr_from_iso(end_iso: str | None) -> str:
+    if not end_iso:
+        return "—"
+    try:
+        dt = datetime.fromisoformat(end_iso.replace("Z", "+00:00"))
+        sec = (dt - utc_now()).total_seconds()
+        if sec <= 0: return "Ended"
+        days = sec / 86400.0
+        return f"{days:.1f}d"
+    except Exception:
+        return "—"
 
-# =========================
-# Rollover previous index → snapshot (previous run only)
-# =========================
-def rollover_previous_index_to_snapshot(site_dir: Path) -> Optional[str]:
-    idx = site_dir / "index.html"
-    if not idx.exists(): return None
-    html = idx.read_text(encoding="utf-8", errors="ignore")
-    m = re.search(r"<!--\s*build_ts:\s*([0-9]{4}-[0-9]{2}-[0-9]{2}_[0-9]{6})\s*-->", html)
-    if not m: return None
-    ts = m.group(1)
-    snap = site_dir / f"dashboard_{ts}.html"
-    if snap.exists(): return None
-    snap.write_text(html, encoding="utf-8")
-    return snap.name
+# -----------------------
+# Templating
+# -----------------------
+BASE_CSS = """
+:root { --bg:#0b0b10; --fg:#eaeaf0; --muted:#a3a8b4; --card:#141420; --border:#232336; --accent:#6ea8fe; --accent-2:#a879fe; }
+* { box-sizing: border-box; }
+body { margin:0; font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, sans-serif; background: var(--bg); color: var(--fg); }
+.container { max-width: 1240px; margin: 0 auto; padding: 32px 24px 44px; }
+.header { margin-bottom: 18px; }
+.header h1 { margin:0; font-size: 34px; font-variant: small-caps; letter-spacing: .5px; }
+.header .date { color: var(--fg); font-size: 20px; font-weight: 600; margin-top: 6px; }
+.header .source { color: var(--muted); font-size: 14px; margin-top: 6px; }
 
-# =========================
-# Description rotation (robust to old history formats)
-# =========================
-def _list_files(dirpath: Path, exts: Tuple[str, ...]) -> List[Path]:
-    if not dirpath.exists(): return []
-    return sorted([p for p in dirpath.iterdir() if p.is_file() and p.suffix.lower() in exts])
+.navrow { display:flex; align-items:center; gap:12px; margin: 8px 0 18px; flex-wrap: wrap; }
+.btn { display:inline-flex; align-items:center; justify-content:center; gap:8px; padding:12px 14px; border:1px solid var(--border); border-radius: 14px; background:transparent; color:var(--fg); text-decoration:none; font-weight:700; }
+.btn:hover { background:#141827; }
+.btn[hidden] { display:none !important; }
+.btn .ico { font-size: 14px; line-height: 1; opacity:.9; }
 
-def _load_history() -> Dict[str, List[str]]:
+/* Tabs */
+.tabs { display:grid; grid-template-columns:1fr 1fr; border:1px solid var(--border); border-radius:14px; overflow:hidden; margin: 12px 0 22px; }
+.tabs button { background: transparent; color: var(--fg); padding: 14px 12px; border:0; cursor:pointer; font-weight:700; font-size: 14px; }
+.tabs button.active { background: var(--accent); color: #0b0b10; }
+
+/* Grid & Cards */
+.grid { display:grid; gap:18px; grid-template-columns: 1fr; }
+@media (min-width: 680px) { .grid { grid-template-columns: 1fr 1fr; } }
+@media (min-width: 1024px) { .grid { grid-template-columns: 1fr 1fr 1fr; } }
+.card { border:1px solid var(--border); background: var(--card); border-radius: 16px; overflow:hidden; }
+.card-body { padding:14px; }
+.card h3 { margin:0; font-size:16px; font-weight:700; line-height:1.3; }
+.stats { display:grid; grid-template-columns:1fr 1fr; gap:10px; margin-top:10px; }
+.stat { border:1px solid var(--border); border-radius: 12px; padding:8px; font-size:12px; }
+.stat .lab { display:block; font-weight:700; margin-bottom:4px; font-size:12px; }
+.stat .val { font-size:12px; }
+
+.embed-wrap { width:100%; aspect-ratio: 20/9; background:#0f1120; }
+.embed { width:100%; height:100%; border:0; }
+.embed-caption { margin: 6px 14px 12px; font-size:12px; color: var(--muted); opacity:.9; }
+.embed-caption a { color: inherit; text-decoration: none; }
+.embed-caption a:hover { text-decoration: underline; }
+
+/* Sections */
+.section { margin-top: 18px; }
+.section h2 { margin:0 0 10px 0; font-size: 16px; }
+.meta-block { margin-top: 18px; color:var(--muted); font-size: 14px; }
+
+/* Footer */
+.footer { margin-top: 26px; border-top:1px solid var(--border); padding-top:18px; color:var(--muted); font-size:12px; text-align:center; }
+.footer .navrow { justify-content:center; margin-top: 10px; }
+
+/* System info */
+.sys { margin-top:8px; font-size: 11px; color: var(--muted); opacity:.85; }
+"""
+
+TABS_JS = """
+<script>
+(function(){
+  const tabHot = document.getElementById('tab-hot');
+  const tabGem = document.getElementById('tab-overlooked');
+  const secHot = document.getElementById('sec-hot');
+  const secGem = document.getElementById('sec-overlooked');
+
+  function activate(which){
+    if(which==='hot'){
+      tabHot.classList.add('active');
+      tabGem.classList.remove('active');
+      secHot.style.display = '';
+      secGem.style.display = 'none';
+    }else{
+      tabGem.classList.add('active');
+      tabHot.classList.remove('active');
+      secGem.style.display = '';
+      secHot.style.display = 'none';
+    }
+  }
+
+  tabHot?.addEventListener('click', ()=>activate('hot'));
+  tabGem?.addEventListener('click', ()=>activate('overlooked'));
+  // default to HOT visible
+  activate('hot');
+})();
+</script>
+"""
+
+# -----------------------
+# HTML builders
+# -----------------------
+def build_nav_top(page_type: str) -> str:
     """
-    Returns a dict with keys 'meta_recent' and 'long_recent'.
-    If the on-disk JSON is an old list format or invalid, normalize it.
+    Top row: Home (left) and Archive (right), hidden on their own pages
+    page_type: 'index' | 'archive' | 'snapshot'
     """
-    default_hist: Dict[str, List[str]] = {"meta_recent": [], "long_recent": []}
-    if DESC_HISTORY.exists():
-        try:
-            data = json.loads(DESC_HISTORY.read_text(encoding="utf-8"))
-            # Old format: a list of names -> convert into meta_recent only
-            if isinstance(data, list):
-                return {"meta_recent": list(map(str, data))[:RECENT_WINDOW], "long_recent": []}
-            if isinstance(data, dict):
-                # ensure keys exist and are lists
-                meta_recent = data.get("meta_recent", [])
-                long_recent = data.get("long_recent", [])
-                if not isinstance(meta_recent, list): meta_recent = []
-                if not isinstance(long_recent, list): long_recent = []
-                return {"meta_recent": meta_recent[:RECENT_WINDOW], "long_recent": long_recent[:RECENT_WINDOW]}
-        except Exception:
-            pass
-    return default_hist
+    home_hidden = " hidden" if page_type == "index" else ""
+    arch_hidden = " hidden" if page_type == "archive" else ""
+    return (
+        "<div class='navrow' role='navigation' aria-label='Top utility navigation'>"
+        f"<a class='btn{home_hidden}' href='index.html' aria-label='Home'><span class='ico'>&larr;</span> Home</a>"
+        f"<span style='flex:1 1 auto'></span>"
+        f"<a class='btn{arch_hidden}' href='archive.html' aria-label='Archive'>Archive <span class='ico'>&rarr;</span></a>"
+        "</div>"
+    )
 
-def _save_history(h: Dict[str, List[str]]):
-    DESC_HISTORY.parent.mkdir(parents=True, exist_ok=True)
-    DESC_HISTORY.write_text(json.dumps(h, ensure_ascii=False, indent=2), encoding="utf-8")
+def build_nav_back_forward(page_type: str, back_href: str | None, fwd_href: str | None) -> str:
+    """
+    Second row: Back / Forward according to rules.
+    If a link is not available, hide its button.
+    """
+    back_hidden = " hidden" if not back_href else ""
+    fwd_hidden  = " hidden" if not fwd_href else ""
+    back_btn = f"<a class='btn{back_hidden}' href='{escape(back_href or '')}' aria-label='Back'>Back <span class='ico'>&rarr;</span></a>"
+    fwd_btn  = f"<a class='btn{fwd_hidden}'  href='{escape(fwd_href or '')}' aria-label='Forward'><span class='ico'>&larr;</span> Forward</a>"
+    return f"<div class='navrow' role='navigation' aria-label='Snapshot navigation'>{fwd_btn}<span style='flex:1 1 auto'></span>{back_btn}</div>"
 
-def _strip_html(s: str) -> str:
-    return re.sub(r"<[^>]*>", "", s or "").strip()
+def build_card(row: dict) -> str:
+    title = row.get("question") or "(Untitled)"
+    url = row.get("url") or ""
+    embed = row.get("embedSrc") or ""
+    vol24 = parse_money(row.get("volume24h"))
+    spread = (row.get("avgSpread") or "—")
+    ttr = ttr_from_iso(row.get("endDateISO"))
+    momentum = row.get("momentumPct24h") or row.get("momentumDelta24h") or "—"
+    return f"""
+<article class="card">
+  <div class="embed-wrap">
+    <iframe class="embed" title="{escape(title)}" src="{escape(embed)}" loading="lazy" referrerpolicy="no-referrer-when-downgrade"></iframe>
+  </div>
+  {caption_text(title, url)}
+  <div class="card-body">
+    <h3>{escape(title)}</h3>
+    <div class="stats">
+      <div class="stat"><span class="lab">24h Vol</span><span class="val">{escape(vol24)}</span></div>
+      <div class="stat"><span class="lab">Avg Spread</span><span class="val">{escape(str(spread))}</span></div>
+      <div class="stat"><span class="lab">Time to Resolve</span><span class="val">{escape(ttr)}</span></div>
+      <div class="stat"><span class="lab">Momentum</span><span class="val">{escape(str(momentum))}</span></div>
+    </div>
+  </div>
+</article>""".strip()
 
-def _pick_without_recent(paths: List[Path], recent: List[str]) -> Optional[Path]:
-    if not paths: return None
-    pool = [p for p in paths if p.name not in recent] or paths
-    return random.choice(pool)
+def render_grid(rows: list[dict]) -> str:
+    return "<section class='grid'>" + "\n".join(build_card(r) for r in rows) + "</section>"
 
-def choose_descriptions() -> tuple[str, str, str, str]:
-    META_DIR.mkdir(parents=True, exist_ok=True)
-    LONG_DIR.mkdir(parents=True, exist_ok=True)
-    meta_files = _list_files(META_DIR, (".txt",))
-    long_files = _list_files(LONG_DIR, (".html", ".htm", ".txt"))
-    hist = _load_history()
-
-    meta_recent = list(hist.get("meta_recent", []))
-    long_recent = list(hist.get("long_recent", []))
-
-    meta_pick = _pick_without_recent(meta_files, meta_recent)
-    if meta_pick:
-        raw = meta_pick.read_text(encoding="utf-8")
-        # collapse whitespace, limit 160
-        cleaned = " ".join(raw.split())
-        meta_text = _strip_html(cleaned)[:160]
-        meta_name = meta_pick.name
-    else:
-        meta_text = "Live Polymarket dashboards—hottest markets & overlooked chances. Updated every 6 hours."
-        meta_name = "(default)"
-
-    long_pick = _pick_without_recent(long_files, long_recent)
-    if long_pick:
-        long_html = long_pick.read_text(encoding="utf-8")
-        long_name = long_pick.name
-    else:
-        long_html = (
-            "<p>This dashboard highlights activity, spreads, and time-to-resolve. "
-            "Updated every six hours. Not financial advice; do your own research.</p>"
-        )
-        long_name = "(default)"
-
-    # update recency lists
-    if meta_name != "(default)":
-        meta_recent = [meta_name] + [n for n in meta_recent if n != meta_name]
-        meta_recent = meta_recent[:RECENT_WINDOW]
-    if long_name != "(default)":
-        long_recent = [long_name] + [n for n in long_recent if n != long_name]
-        long_recent = long_recent[:RECENT_WINDOW]
-
-    _save_history({"meta_recent": meta_recent, "long_recent": long_recent})
-    return meta_text, long_html, meta_name, long_name
-
-# =========================
-# HTML helpers
-# =========================
-def html_head(title: str, page_url: str, desc: str, iso_now: str, build_ts: str, nonce: str) -> str:
-    return f"""<head>
+def page_head(title: str, description: str, canonical: str, og_updated: datetime, build_ts_tag: str, build_nonce: str) -> str:
+    return f"""<!doctype html><html lang='en'><head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>{html_lib.escape(title)}</title>
-<!-- build_ts: {build_ts} -->
-<!-- build_nonce: {nonce} -->
-<meta name="description" content="{html_lib.escape(desc)}" />
+<title>{escape(title)}</title>
+<!-- build_ts: {escape(build_ts_tag)} -->
+<!-- build_nonce: {escape(build_nonce)} -->
+<meta name="description" content="{escape(description)}" />
 <meta name="keywords" content="polymarket, election odds, prediction markets, betting markets, hidden gems, dashboard" />
-<link rel="canonical" href="{html_lib.escape(page_url)}" />
-<meta property="og:title" content="{html_lib.escape(title)}" />
-<meta property="og:description" content="{html_lib.escape(desc)}" />
+<link rel="canonical" href="{escape(canonical)}" />
+<meta property="og:title" content="{escape(title)}" />
+<meta property="og:description" content="{escape(description)}" />
 <meta property="og:type" content="website" />
-<meta property="og:url" content="{html_lib.escape(page_url)}" />
-<meta property="og:image" content="{SITE_BASE}/og-preview.png" />
-<meta property="og:updated_time" content="{iso_now}" />
+<meta property="og:url" content="{escape(canonical)}" />
+<meta property="og:image" content="https://urbanpoly.com/og-preview.png" />
+<meta property="og:updated_time" content="{escape(iso_og_time(og_updated))}" />
 <meta name="twitter:card" content="summary_large_image" />
-<meta name="twitter:title" content="{html_lib.escape(title)}" />
-<meta name="twitter:description" content="{html_lib.escape(desc)}" />
-<meta name="twitter:image" content="{SITE_BASE}/og-preview.png" />
-<style>
-:root {{ --bg:#0b0b10; --fg:#eaeaf0; --muted:#a3a8b4; --card:#141420; --border:#232336; --accent:#6ea8fe; --accent-2:#a879fe; }}
-* {{ box-sizing: border-box; }}
-body {{ margin:0; font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, sans-serif; background: var(--bg); color: var(--fg); }}
-.container {{ max-width: 1240px; margin: 0 auto; padding: 32px 24px 44px; }}
-.header {{ margin-bottom: 18px; }}
-.header h1 {{ margin:0; font-size: 34px; font-variant: small-caps; letter-spacing: .5px; }}
-.header .date {{ color: var(--fg); font-size: 20px; font-weight: 600; margin-top: 6px; }}
-.header .source {{ color: var(--muted); font-size: 14px; margin-top: 6px; }}
-.navrow {{ display:flex; align-items:center; gap:12px; margin: 8px 0 18px; flex-wrap: wrap; }}
-.btn {{ display:inline-flex; align-items:center; gap:8px; padding:10px 14px; border:1px solid var(--border); border-radius: 14px; background:transparent; color:var(--fg); text-decoration:none; font-weight:700; }}
-.btn:hover {{ background:#111322; }}
-.tabs {{ display:grid; grid-template-columns: 1fr 1fr; border:1px solid var(--border); border-radius: 14px; overflow: hidden; margin: 12px 0 22px; }}
-.tabs button {{ background: transparent; color: var(--fg); padding: 14px 12px; border:0; cursor:pointer; font-weight:700; font-size: 14px; }}
-.tabs button.active {{ background: var(--accent); color: #0b0b10; }}
-.grid {{ display:grid; gap: 18px; grid-template-columns: repeat(1, minmax(0,1fr)); }}
-@media (min-width:720px) {{ .grid {{ grid-template-columns: repeat(2, minmax(0,1fr)); }} }}
-@media (min-width:1024px) {{ .grid {{ grid-template-columns: repeat(3, minmax(0,1fr)); }} }}
-.card {{ background: var(--card); border:1px solid var(--border); border-radius: 16px; overflow:hidden; }}
-.card figure {{ margin:0; }}
-.card .embed {{ width:100%; aspect-ratio: 20/9; background:#151522; }}
-.card h3 {{ margin:14px 16px 6px; font-size: 16px; line-height: 1.2; }}
-.card p {{ margin:0 16px 10px; color:var(--muted); font-size: 13px; }}
-.meta {{ margin: 0 16px 16px; font-size: 13px; color: var(--fg); opacity:.95; }}
-.footer {{ margin-top: 28px; color: var(--muted); text-align:center; font-size: 12px; }}
-.section {{ margin-top: 22px; }}
-.section h2 {{ margin: 0 0 10px; font-size: 18px; }}
-.disclaimer {{ color:#ff9a9a; }}
-.hr {{ height:1px; background:var(--border); margin: 26px 0; }}
-.figcap {{ margin: 6px 16px 0; color: var(--muted); font-size: 12px; }}
-</style>
-</head>"""
+<meta name="twitter:title" content="{escape(title)}" />
+<meta name="twitter:description" content="{escape(description)}" />
+<meta name="twitter:image" content="https://urbanpoly.com/og-preview.png" />
+<style>{BASE_CSS}</style>
+</head><body>
+"""
 
-def market_card(row: Dict[str, Any]) -> str:
-    title = row.get("question") or "(Untitled market)"
-    why   = row.get("why") or (row.get("category") or "—")
-    embed = row.get("embedSrc") or ""
-    vol   = fmt_money(num(row.get("volume24h")) or num(row.get("volume")))
-    ttr   = ttr_badge(row.get("timeToResolveDays"))
-    meta_line = f"24h {vol} • {ttr}"
-    aria_label = f"Polymarket embed for: {title}"
-    market_url = row.get("url") or ""
-    caption = f"{title}" + (f" — View: {html_lib.escape(market_url)}" if market_url else "")
+def page_footer(build_dt: datetime, page_type: str, back_href: str | None, fwd_href: str | None) -> str:
+    # Footer nav mirrors header nav rows
     return f"""
-<div class="card">
-  <figure>
-    <div class="embed">
-      <iframe
-        title="{html_lib.escape(title)}"
-        aria-label="{html_lib.escape(aria_label)}"
-        src="{html_lib.escape(embed)}"
-        width="100%" height="100%" frameborder="0"
-        loading="lazy" referrerpolicy="no-referrer-when-downgrade">
-      </iframe>
-    </div>
-    <figcaption class="figcap">{html_lib.escape(caption)}</figcaption>
-    <noscript>Embedded market requires JavaScript. Follow the caption link to view the market.</noscript>
-  </figure>
-  <h3>{html_lib.escape(title)}</h3>
-  <p>{html_lib.escape(why)}</p>
-  <div class="meta">{html_lib.escape(meta_line)}</div>
+<div class="footer">
+  <div class="navrow" role="navigation" aria-label="Footer utility nav">
+    {'<a class="btn" href="index.html"><span class="ico">&larr;</span> Home</a>' if page_type!='index' else ''}
+    <span style="flex:1 1 auto"></span>
+    {'<a class="btn" href="archive.html">Archive <span class="ico">&rarr;</span></a>' if page_type!='archive' else ''}
+  </div>
+  {build_nav_back_forward(page_type, back_href, fwd_href)}
+  <div class="sys">Last updated: {escape(human_date(build_dt))}</div>
+  <div class="sys">Not financial advice. DYOR.</div>
+</div>
+</body></html>"""
+
+def description_html(short: str, long_html: str) -> str:
+    return f"""
+<div class="section">
+  <h2>Description</h2>
+  <p class="meta-block">{escape(short)}</p>
+  {long_html}
 </div>
 """.strip()
 
-def section(title: str, rows: List[Dict[str, Any]]) -> str:
-    cards_html = "\n".join(market_card(r) for r in rows)
-    return (
-        "<div class=\"section\">"
-        f"<h2>{html_lib.escape(title)}</h2>"
-        "<div class=\"grid\">"
-        f"{cards_html}"
-        "</div>"
-        "</div>"
+def methodology_html() -> str:
+    return """
+<div class="section">
+  <h2>Methodology</h2>
+  <ul class="meta-block">
+    <li><strong>Hottest</strong>: Prioritizes 24h volume, tighter spreads, and sooner time-to-resolve.</li>
+    <li><strong>Overlooked</strong>: Prefers near-50% binary midpoints, negative underround, moderate 24h volume, and sooner resolution.</li>
+    <li><strong>Why line</strong>: Displays quick cues like “24h $X • TTR Yd” pulled from the Polymarket API.</li>
+  </ul>
+</div>
+""".strip()
+
+# -----------------------
+# Main build
+# -----------------------
+def main():
+    SITE_DIR.mkdir(parents=True, exist_ok=True)
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+
+    # Pick CSV
+    if len(sys.argv) > 1:
+        csv_path = Path(sys.argv[1])
+    else:
+        csv_path = newest_csv_in_data()
+        if not csv_path:
+            print("ERROR: No CSV found in data/, and none provided")
+            sys.exit(1)
+
+    print(f"[builder] CLI CSV arg detected: {csv_path}" if len(sys.argv)>1 else f"[builder] Auto-picked latest CSV: {csv_path}")
+    rows = read_csv_rows(csv_path)
+    if not rows:
+        print("ERROR: CSV has no rows")
+        sys.exit(1)
+
+    # Slice top 12 lists by the CSV order (assume already ranked), or fallback safe slice
+    top = rows[:12]
+    # derive a "gems" set by filtering where near50Flag==1 or underround<0 then take first 12
+    gems_pool = []
+    for r in rows:
+        try:
+            near50 = float(r.get("near50Flag") or 0)
+        except Exception:
+            near50 = 0
+        try:
+            under = float(r.get("underround") or 0)
+        except Exception:
+            under = 0
+        if near50 >= 1 or under < 0:
+            gems_pool.append(r)
+    gems = (gems_pool[:12]) if gems_pool else rows[12:24]
+
+    # ROTATING descriptions (index & archive); snapshots freeze
+    hist = load_history()
+    meta_files = sorted(META_DIR.glob("*.txt"))
+    long_files = sorted(LONG_DIR.glob("*.html"))
+
+    meta_pick = choose_rotating_file(meta_files, hist["recent_meta"])
+    long_pick = choose_rotating_file(long_files, hist["recent_long"])
+    short_desc = (meta_pick.read_text(encoding="utf-8").strip() if meta_pick and meta_pick.exists() else "Daily dashboard of Polymarket heat & overlooked opportunities.")
+    long_desc_html = (long_pick.read_text(encoding="utf-8") if long_pick and long_pick.exists() else "<p>Insightful commentary rotates here.</p>")
+
+    print(f"[builder] Using meta={meta_pick.name if meta_pick else '—'}, long={long_pick.name if long_pick else '—'}")
+
+    # Times / titles
+    now = utc_now()
+    human = human_date(now)
+    build_ts_tag = now.strftime("%Y-%m-%d_%H%M%S")
+    nonce = str(random.getrandbits(31))
+
+    # ---------- Build INDEX (with Today) ----------
+    index_title = f"Hottest Markets & Overlooked Chances on Polymarket Today — {human}"
+    head = page_head(
+        title=index_title,
+        description=short_desc[:160],
+        canonical="https://urbanpoly.com/index.html",
+        og_updated=now,
+        build_ts_tag=build_ts_tag,
+        build_nonce=nonce,
     )
+    # top nav (Archive only on index)
+    top_nav = build_nav_top("index")
+    # back link on index: previous snapshot by filename order (if exists)
+    snapshots = sorted(SITE_DIR.glob("dashboard_*.html"))
+    back_href_index = snapshots[-1].name if snapshots else None
+    nav_row = build_nav_back_forward("index", back_href_index, None)
 
-# =========================
-# Pages (nav rules + Home/Archive buttons)
-# =========================
-def render_index(now_text: str, build_ts: str, hot: List[Dict[str, Any]], gems: List[Dict[str, Any]],
-                 meta_desc: str, long_html: str, newest_snapshot: Optional[str]) -> str:
-    title = f"Hottest Markets & Overlooked Chances on Polymarket Today — {now_text}"
-    page_url = f"{SITE_BASE}/index.html"
-    iso_now = datetime.now(timezone.utc).isoformat(timespec="seconds")
-    nonce = str(int(time.time()))
-    head = html_head(title, page_url, meta_desc, iso_now, build_ts, nonce)
-
-    home_arch = '<a class="btn" href="archive.html">Archive</a>'
-    back_btn  = f'<a class="btn" href="{html_lib.escape(newest_snapshot)}">Back →</a>' if newest_snapshot else ""
-
-    hot_sec = section("HOT (Top 12)", hot[:12])
-    gem_sec = section("Overlooked (Top 12)", gems[:12])
-
-    body = f"""<body>
-<div class="container">
-  <div class="header">
-    <h1>Hottest Markets &amp; Overlooked Chances on Polymarket Today</h1>
-    <div class="date">{now_text}</div>
-    <div class="source">Source: Polymarket API data.</div>
-  </div>
-
-  <div class="navrow">
-    {home_arch}
-    {back_btn}
-  </div>
-
-  <div class="tabs" aria-hidden="true">
-    <button class="active" type="button">HOT</button>
-    <button type="button">Hidden Gems</button>
-  </div>
-
-  {hot_sec}
-  {gem_sec}
-
-  <div class="hr"></div>
-  <div class="section">
-    <h2>Methodology</h2>
-    <p><strong>Hottest:</strong> Prioritizes 24h volume, tighter spreads, and sooner time-to-resolve.</p>
-    <p><strong>Overlooked:</strong> Prefers near-50% midpoints, negative underround, moderate 24h volume, and sooner resolution.</p>
-    <p><strong>Why line:</strong> “24h $X • TTR Yd”.</p>
-  </div>
-  <div class="section">
-    <h2>Description</h2>
-    {long_html}
-  </div>
-  <div class="hr"></div>
-  <div class="footer">
-    <div><span class="disclaimer"><strong>Not financial advice.</strong> DYOR.</span></div>
-    <div>Updated {now_text}</div>
-  </div>
+    tabs = f"""
+<div class="tabs">
+  <button id="tab-hot" class="active">HOT</button>
+  <button id="tab-overlooked">Overlooked</button>
 </div>
-</body>"""
-    return f"<!doctype html><html lang='en'>{head}{body}</html>"
+"""
 
-def render_archive(now_text: str, build_ts: str, snapshots: List[str]) -> str:
-    title = "Polymarket Dashboards — Archive"
-    desc  = "Browse historical snapshots; updated every 6 hours. Hottest markets & overlooked chances."
-    page_url = f"{SITE_BASE}/archive.html"
-    iso_now = datetime.now(timezone.utc).isoformat(timespec="seconds")
-    nonce = str(int(time.time()))
-    head = html_head(title, page_url, desc, iso_now, build_ts, nonce)
+    html_index = [
+        head,
+        f"<div class='container'>",
+        "<header class='header'>",
+        f"<h1>Hottest Markets &amp; Overlooked Chances on Polymarket Today</h1>",
+        f"<div class='date'>{escape(human)}</div>",
+        "<div class='source'>Source: Polymarket API data.</div>",
+        "</header>",
+        top_nav,
+        nav_row,
+        tabs,
+        # No extra headings "HOT (Top 12)" etc. — removed per STEP 5
+        "<section id='sec-hot'>",
+        render_grid(top),
+        "</section>",
+        "<section id='sec-overlooked' style='display:none'>",
+        render_grid(gems),
+        "</section>",
+        description_html(short_desc, long_desc_html),
+        methodology_html(),
+        "</div>",
+        TABS_JS,
+        page_footer(now, "index", back_href_index, None),
+    ]
+    (SITE_DIR / "index.html").write_text("\n".join(html_index), encoding="utf-8")
 
-    home_btn = '<a class="btn" href="index.html">Home</a>'
-    oldest = snapshots[-1] if snapshots else None
-    fwd_btn = f'<a class="btn" href="{html_lib.escape(oldest)}">← Forward</a>' if oldest else ""
+    # ---------- Build SNAPSHOT (drop Today) ----------
+    snap_name = ts_for_snapshot(now)
+    snap_title = f"Hottest Markets & Overlooked Chances on Polymarket — {human}"
+    head_snap = page_head(
+        title=snap_title,
+        description=short_desc[:160],  # freeze description at publish time
+        canonical=f"https://urbanpoly.com/{snap_name}",
+        og_updated=now,
+        build_ts_tag=build_ts_tag,
+        build_nonce=nonce,
+    )
+    # snapshot nav: Home+Archive top; back+forward second row
+    # compute neighbors from existing snapshots + this one
+    snapshots = sorted(SITE_DIR.glob("dashboard_*.html"))
+    # When building, this new snapshot isn't yet written; neighbors are from existing
+    older = snapshots  # older already existing ones
+    older_names = [p.name for p in older]
+    # back href: last older (or archive)
+    snap_back = older_names[-1] if older_names else "archive.html"
+    # forward href: none yet (to be index)
+    snap_fwd = "index.html"
+    top_nav_snap = build_nav_top("snapshot")
+    nav_row_snap = build_nav_back_forward("snapshot", snap_back, snap_fwd)
 
-    def label(fn: str) -> str:
-        m = re.search(r"dashboard_([0-9]{4}-[0-9]{2}-[0-9]{2})_([0-9]{6})\.html", fn)
-        if not m: return fn
-        d, hms = m.group(1), m.group(2)
-        return f"{d} • {hms[:2]}:{hms[2:4]}:{hms[4:]}"
+    html_snap = [
+        head_snap,
+        "<div class='container'>",
+        "<header class='header'>",
+        f"<h1>Hottest Markets &amp; Overlooked Chances on Polymarket</h1>",
+        f"<div class='date'>{escape(human)}</div>",
+        "<div class='source'>Source: Polymarket API data.</div>",
+        "</header>",
+        top_nav_snap,
+        nav_row_snap,
+        """
+<div class="tabs">
+  <button id="tab-hot" class="active">HOT</button>
+  <button id="tab-overlooked">Overlooked</button>
+</div>
+""",
+        "<section id='sec-hot'>",
+        render_grid(top),
+        "</section>",
+        "<section id='sec-overlooked' style='display:none'>",
+        render_grid(gems),
+        "</section>",
+        # Snapshot keeps the description frozen at publish time
+        description_html(short_desc, long_desc_html),
+        methodology_html(),
+        "</div>",
+        TABS_JS,
+        page_footer(now, "snapshot", snap_back, snap_fwd),
+    ]
+    (SITE_DIR / snap_name).write_text("\n".join(html_snap), encoding="utf-8")
 
+    # ---------- Build ARCHIVE (rotating description like index) ----------
+    # forward on archive = oldest snapshot (if any)
+    snaps_after_write = sorted(SITE_DIR.glob("dashboard_*.html"))
+    oldest = snaps_after_write[0].name if snaps_after_write else None
+    head_arch = page_head(
+        title="Polymarket Dashboards — Archive",
+        description=short_desc[:160],  # rotates every run
+        canonical="https://urbanpoly.com/archive.html",
+        og_updated=now,
+        build_ts_tag=build_ts_tag,
+        build_nonce=nonce,
+    )
+    top_nav_arch = build_nav_top("archive")
+    nav_row_arch = build_nav_back_forward("archive", None, oldest)
+
+    # Simple list of snapshots newest->oldest
     items = []
-    for fn in snapshots:
-        items.append(f'<li><a class="btn" href="{html_lib.escape(fn)}">{html_lib.escape(label(fn))}</a></li>')
-    list_html = "\n".join(items) if items else "<li>No snapshots yet.</li>"
+    for p in sorted(snaps_after_write, key=lambda x: x.stat().st_mtime, reverse=True):
+        label = p.name.replace("dashboard_", "").replace(".html", "")
+        items.append(f"<li><a href='{p.name}'>{escape(label)}</a></li>")
+    list_html = "<ul>" + "\n".join(items) + "</ul>" if items else "<p>No snapshots yet.</p>"
 
-    body = f"""<body>
-<div class="container">
-  <div class="header">
-    <h1>Archive</h1>
-    <div class="date">{now_text}</div>
-    <div class="source">Source: Polymarket API data.</div>
-  </div>
+    html_arch = [
+        head_arch,
+        "<div class='container'>",
+        "<header class='header'>",
+        "<h1>Archive</h1>",
+        f"<div class='date'>{escape(human)}</div>",
+        "<div class='source'>All published snapshots, newest first.</div>",
+        "</header>",
+        top_nav_arch,
+        nav_row_arch,
+        "<div class='section'><h2>All Snapshots</h2>",
+        list_html,
+        "</div>",
+        # Archive gets rotating description every run (STEP 7)
+        description_html(short_desc, long_desc_html),
+        methodology_html(),
+        "</div>",
+        page_footer(now, "archive", None, oldest),
+    ]
+    (SITE_DIR / "archive.html").write_text("\n".join(html_arch), encoding="utf-8")
 
-  <div class="navrow">
-    {home_btn}
-    {fwd_btn}
-  </div>
+    # ---------- robots.txt & sitemap.xml ----------
+    robots = "User-agent: *\nAllow: /\nSitemap: https://urbanpoly.com/sitemap.xml\n"
+    (SITE_DIR / "robots.txt").write_text(robots, encoding="utf-8")
 
-  <div class="section">
-    <h2>Snapshots</h2>
-    <ul style="list-style:none; padding:0; display:grid; grid-template-columns:repeat(1,minmax(0,1fr)); gap:10px;">
-      {list_html}
-    </ul>
-  </div>
-
-  <div class="hr"></div>
-  <div class="footer">
-    <div><span class="disclaimer"><strong>Not financial advice.</strong> DYOR.</span></div>
-    <div>Updated {now_text}</div>
-  </div>
-</div>
-</body>"""
-    return f"<!doctype html><html lang='en'>{head}{body}</html>"
-
-# =========================
-# SEO assets
-# =========================
-def write_sitemap_xml(site_dir: Path, site_base: str, pages: List[Dict[str, str]]):
-    out = site_dir / "sitemap.xml"
-    lines = [
+    # Build a sitemap of index + archive + all snapshots
+    snap_names = [p.name for p in snaps_after_write]
+    urls = ["index.html", "archive.html"] + snap_names
+    locs = [f"https://urbanpoly.com/{u}" for u in urls]
+    lastmod = iso_og_time(now)
+    sm = [
         '<?xml version="1.0" encoding="UTF-8"?>',
         '<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">'
     ]
-    for p in pages:
-        lines.append("  <url>")
-        lines.append(f"    <loc>{p['loc']}</loc>")
-        lastmod = p.get("lastmod", "")
-        if lastmod:
-            lines.append(f"    <lastmod>{lastmod}</lastmod>")
-        lines.append("  </url>")
-    lines.append("</urlset>")
-    out.write_text("\n".join(lines), encoding="utf-8")
+    for loc in locs:
+        sm += [
+            "<url>",
+            f"<loc>{loc}</loc>",
+            f"<lastmod>{lastmod}</lastmod>",
+            "</url>"
+        ]
+    sm.append("</urlset>")
+    (SITE_DIR / "sitemap.xml").write_text("\n".join(sm), encoding="utf-8")
 
-def write_robots_txt(site_dir: Path, site_base: str):
-    (site_dir / "robots.txt").write_text(
-        f"User-agent: *\nAllow: /\nSitemap: {site_base}/sitemap.xml\n",
-        encoding="utf-8"
-    )
-
-# =========================
-# Snapshot nav rewrite
-# =========================
-def rewrite_snapshot_navs(site_dir: Path):
-    snaps = sorted(site_dir.glob("dashboard_*.html"), key=lambda p: p.name, reverse=True)  # newest → oldest
-    if not snaps: return
-    for idx, snap in enumerate(snaps):
-        html = snap.read_text(encoding="utf-8", errors="ignore")
-        newer = snaps[idx-1].name if idx-1 >= 0 else None
-        older = snaps[idx+1].name if idx+1 < len(snaps) else None
-        back_href = older if older else "archive.html"
-        fwd_href  = newer if newer else "index.html"
-        new_nav = (
-            "<!-- NAV_START -->"
-            "<div class=\"navrow\">"
-            "<a class=\"btn\" href=\"index.html\">Home</a>"
-            "<a class=\"btn\" href=\"archive.html\">Archive</a>"
-            f"<a class=\"btn\" href=\"{html_lib.escape(fwd_href)}\">← Forward</a>"
-            f"<a class=\"btn\" href=\"{html_lib.escape(back_href)}\">Back →</a>"
-            "</div>"
-            "<!-- NAV_END -->"
-        )
-        html_new = re.sub(r"<!--\s*NAV_START\s*-->.*?<!--\s*NAV_END\s*-->", new_nav, html, flags=re.DOTALL)
-        if html_new != html:
-            snap.write_text(html_new, encoding="utf-8")
-
-# =========================
-# Main
-# =========================
-def main():
-    random.seed()
-    csv_path = resolve_csv_path()
-    print(f"[builder] Using CSV: {csv_path}")
-
-    rows = read_rows(csv_path)
-    hot, gems = pick_hot_and_gems(rows, k=12)
-
-    SITE_DIR.mkdir(parents=True, exist_ok=True)
-
-    # 1) snapshot previous index (previous run) using second-level stamp
-    rolled = rollover_previous_index_to_snapshot(SITE_DIR)
-    if rolled:
-        print(f"[builder] Rolled previous index into snapshot: {rolled}")
-
-    snapshots = sorted([p.name for p in SITE_DIR.glob("dashboard_*.html")], reverse=True)
-    newest_snap = snapshots[0] if snapshots else None
-
-    # 2) choose descriptions (robust)
-    meta_desc, long_html, meta_name, long_name = choose_descriptions()
-    print(f"[builder] Using meta={meta_name}, long={long_name}")
-
-    # 3) render pages
-    now = datetime.now(timezone.utc)
-    build_ts = now.strftime(STAMP_FMT)        # seconds
-    now_text = now.astimezone().strftime("%d %B %Y • %H:%M")
-    iso_now  = now.isoformat(timespec="seconds")
-
-    # index
-    index_html = render_index(now_text, build_ts, hot, gems, meta_desc, long_html, newest_snap)
-    (SITE_DIR / "index.html").write_text(index_html, encoding="utf-8")
-
-    # refresh list
-    snapshots = sorted([p.name for p in SITE_DIR.glob("dashboard_*.html")], reverse=True)
-
-    # archive
-    archive_html = render_archive(now_text, build_ts, snapshots)
-    (SITE_DIR / "archive.html").write_text(archive_html, encoding="utf-8")
-
-    # 4) SEO assets
-    pages = [
-        {"loc": f"{SITE_BASE}/index.html", "lastmod": iso_now},
-        {"loc": f"{SITE_BASE}/archive.html", "lastmod": iso_now},
-    ] + [{"loc": f"{SITE_BASE}/{name}", "lastmod": iso_now} for name in snapshots]
-    write_sitemap_xml(SITE_DIR, SITE_BASE, pages)
-    write_robots_txt(SITE_DIR, SITE_BASE)
-
-    # 5) rewrite snapshot navs (after all pages exist)
-    rewrite_snapshot_navs(SITE_DIR)
+    # Save desc history (for rotation)
+    save_history(hist)
 
     print("[ok] Wrote site/index.html, site/archive.html, site/sitemap.xml, site/robots.txt; updated snapshot navs")
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())
