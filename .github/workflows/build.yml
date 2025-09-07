@@ -124,14 +124,30 @@ jobs:
           echo "---- archive.html head ----"
           head -n 25 "$GITHUB_WORKSPACE/site/archive.html" | sed 's/^/[arch ] /' || true
 
-      # =======================================================
-      # 3) COMMIT & PUSH (REBASE-SAFE; AVOID RACE CONDITIONS)
-      # =======================================================
+      # --- diagnostics before committing ---
+      - name: Git status before commit
+        run: |
+          echo "==== git status (before add) ===="
+          git status
+          echo "==== diff vs HEAD (site/ & data/) ===="
+          git diff --name-only HEAD -- site/ data/ || true
+
       - name: Configure Git
         run: |
           git config --global --add safe.directory "$GITHUB_WORKSPACE"
           git config user.name  "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
+
+      # --- HARD FAIL if build didn't modify site/ ---
+      - name: Verify site/ changed
+        run: |
+          set -e
+          # if nothing changed under site/ (or data/), stop here loudly
+          if git diff --quiet HEAD -- site/ data/ ; then
+            echo "ERROR: build produced no changes under site/ or data/."
+            echo "Tip: ensure the builder writes new content (it prints a new timestamp in <title>)."
+            exit 1
+          fi
 
       - name: Commit and push artifacts (rebase-safe)
         env:
@@ -139,22 +155,22 @@ jobs:
         run: |
           set -e
 
-          # Stage generated changes (site/, data/ etc.)
-          git add -A
+          echo "==== Staging changes (site/, data/) ===="
+          git add -A site data
 
-          if git diff --cached --quiet; then
-            echo "Nothing to commit"; exit 0
-          fi
+          echo "==== Show staged files ===="
+          git diff --cached --name-only
 
-          # Rebase on latest remote to avoid non-fast-forward rejects
+          COMMIT_MSG="Auto-build site $(date -u +'%Y-%m-%d %H:%M:%S UTC')"
+          git commit -m "$COMMIT_MSG"
+
+          echo "==== Rebase on latest remote ===="
           git fetch origin "$BRANCH_NAME" --depth=1 || true
           git pull --rebase --autostash origin "$BRANCH_NAME" || true
 
-          # Try push; if rejected, retry once after rebase
-          if git push origin HEAD:"$BRANCH_NAME"; then
-            echo "Push succeeded"
-          else
-            echo "Push rejected; retrying after rebase…"
-            git pull --rebase --autostash origin "$BRANCH_NAME" || true
-            git push origin HEAD:"$BRANCH_NAME"
-          fi
+          echo "==== Push ===="
+          git push origin HEAD:"$BRANCH_NAME"
+
+          echo "==== Last commit ===="
+          git --no-pager log -1 --stat
+
