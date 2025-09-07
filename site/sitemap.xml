@@ -1,31 +1,35 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
-  <url>
-    <loc>https://urbanpoly.com/index.html</loc>
-    <lastmod>2025-09-07T22:44:33+00:00</lastmod>
-  </url>
-  <url>
-    <loc>https://urbanpoly.com/archive.html</loc>
-    <lastmod>2025-09-07T22:44:33+00:00</lastmod>
-  </url>
-  <url>
-    <loc>https://urbanpoly.com/dashboard_2025-09-07_215949.html</loc>
-    <lastmod>2025-09-07T22:44:33+00:00</lastmod>
-  </url>
-  <url>
-    <loc>https://urbanpoly.com/dashboard_2025-09-07_1928.html</loc>
-    <lastmod>2025-09-07T22:44:33+00:00</lastmod>
-  </url>
-  <url>
-    <loc>https://urbanpoly.com/dashboard_2025-09-07_1340.html</loc>
-    <lastmod>2025-09-07T22:44:33+00:00</lastmod>
-  </url>
-  <url>
-    <loc>https://urbanpoly.com/dashboard_2025-09-07_1238.html</loc>
-    <lastmod>2025-09-07T22:44:33+00:00</lastmod>
-  </url>
-  <url>
-    <loc>https://urbanpoly.com/dashboard_2025-09-07_0138.html</loc>
-    <lastmod>2025-09-07T22:44:33+00:00</lastmod>
-  </url>
+<url>
+<loc>https://urbanpoly.com/index.html</loc>
+<lastmod>2025-09-07T23:23:50Z</lastmod>
+</url>
+<url>
+<loc>https://urbanpoly.com/archive.html</loc>
+<lastmod>2025-09-07T23:23:50Z</lastmod>
+</url>
+<url>
+<loc>https://urbanpoly.com/dashboard_2025-09-07_0138.html</loc>
+<lastmod>2025-09-07T23:23:50Z</lastmod>
+</url>
+<url>
+<loc>https://urbanpoly.com/dashboard_2025-09-07_1238.html</loc>
+<lastmod>2025-09-07T23:23:50Z</lastmod>
+</url>
+<url>
+<loc>https://urbanpoly.com/dashboard_2025-09-07_1340.html</loc>
+<lastmod>2025-09-07T23:23:50Z</lastmod>
+</url>
+<url>
+<loc>https://urbanpoly.com/dashboard_2025-09-07_1928.html</loc>
+<lastmod>2025-09-07T23:23:50Z</lastmod>
+</url>
+<url>
+<loc>https://urbanpoly.com/dashboard_2025-09-07_215949.html</loc>
+<lastmod>2025-09-07T23:23:50Z</lastmod>
+</url>
+<url>
+<loc>https://urbanpoly.com/dashboard_2025-09-07_2323.html</loc>
+<lastmod>2025-09-07T23:23:50Z</lastmod>
+</url>
 </urlset>
