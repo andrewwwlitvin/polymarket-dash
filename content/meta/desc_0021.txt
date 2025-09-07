@@ -1,0 +1,1 @@
+Get context on how accurate is polymarket from current market dynamics. Spot moves early by scanning liquidity and spreads. Use as a starting point, not a signal. DYOR.

@@ -1,0 +1,1 @@
+Get context on what is polymarket odds from current market dynamics. Compare momentum, 24h volume, and time-to-resolve. Refreshed on a 6‑hour cycle. Educational only.

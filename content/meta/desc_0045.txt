@@ -1,0 +1,1 @@
+A practical snapshot of polymarket fees in today’s markets. Spot moves early by scanning liquidity and spreads. Fast to scan, simple to review. DYOR.
