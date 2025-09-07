@@ -21,7 +21,7 @@ concurrency:
 
 env:
   TZ: Europe/Lisbon
-  PYTHONUNBUFFERED: "1"   # stream logs promptly
+  REUSE_MINUTES: "0"
 
 jobs:
   build:
@@ -47,100 +47,54 @@ jobs:
             pip install -r requirements.txt
           fi
 
-      # -------- Known-good fetch: no reuse, no timeout wrapper, same flags --------
-      - name: Fetch latest markets (fast top-k)
-        id: fetch
+      # === Fetch CSV with explicit arguments ===
+      - name: Fetch latest markets
         run: |
           set -euo pipefail
           mkdir -p data
-          echo "[timing] fetch step start: $(date -u +'%Y-%m-%d %H:%M:%S UTC')"
-
-          if [ -f scripts/polymarket_enriched_fast.py ]; then
-            echo "[info] Running fast fetcher with --topk 120 --concurrency 8"
-            start=$(date +%s)
-            # timing(1) prints real/user/sys duration
-            time python scripts/polymarket_enriched_fast.py --topk 120 --concurrency 8
-            end=$(date +%s)
-            echo "[timing] fetcher wall time: $((end-start))s"
-
-            latest=$(ls -1t polymarket_enriched_fast_*.csv | head -n1 || true)
-            if [ -n "${latest:-}" ] && [ -f "$latest" ]; then
-              mv -f "$latest" "data/$latest"
-              echo "LATEST_CSV=$GITHUB_WORKSPACE/data/$latest" >> "$GITHUB_ENV"
-              echo "::notice title=Fetched CSV::data/$latest"
-            else
-              echo "[warn] No new CSV produced; will use newest in data/ if present."
-            fi
-          else
-            echo "[info] Fast fetcher not present; using CSV already in data/."
+          echo "[fetch] REUSE_MINUTES=$REUSE_MINUTES"
+          echo "[fetch] Fetching a NEW CSV..."
+          python scripts/polymarket_enriched_fast.py --topk 120 --concurrency 8
+          latest=$(ls -1t polymarket_enriched_fast_*.csv | head -n1)
+          if [ -n "$latest" ]; then
+            mv "$latest" "data/$latest"
+            echo "LATEST_CSV=$GITHUB_WORKSPACE/data/$latest" >> "$GITHUB_ENV"
+            echo "::notice title=Fetched CSV::data/$latest"
           fi
-
-          echo "List data/ dir (after fetch):"
           ls -lAh data || true
-          echo "[timing] fetch step end: $(date -u +'%Y-%m-%d %H:%M:%S UTC')"
 
-      - name: Generate site (use explicit CSV if available)
+      - name: Generate site
         run: |
           set -euo pipefail
-          echo "GITHUB_WORKSPACE=$GITHUB_WORKSPACE"
-          echo "LATEST_CSV env: ${LATEST_CSV:-<empty>}"
-          echo "[timing] build step start: $(date -u +'%Y-%m-%d %H:%M:%S UTC')"
-
           if [ -n "${LATEST_CSV:-}" ] && [ -f "$LATEST_CSV" ]; then
-            echo "[dbg] CSV head:"
+            echo "[builder] Using CSV: $LATEST_CSV"
             head -n 2 "$LATEST_CSV" | sed 's/^/[csv head] /' || true
-            time python "$GITHUB_WORKSPACE/scripts/build_site_from_csv.py" "$LATEST_CSV"
+            python scripts/build_site_from_csv.py "$LATEST_CSV"
           else
-            echo "[dbg] No explicit LATEST_CSV; builder will auto-pick newest in data/."
-            time python "$GITHUB_WORKSPACE/scripts/build_site_from_csv.py"
+            echo "[builder] No LATEST_CSV set, trying newest in data/"
+            python scripts/build_site_from_csv.py
           fi
+          ls -lAh site || true
 
-          echo "---- list site/ after build ----"
-          ls -lAh "$GITHUB_WORKSPACE/site" || true
-
-          # Guard: ensure we didn't accidentally ship the sample
-          if grep -q "sample_enriched_20250101_000000.csv" "$GITHUB_WORKSPACE/site/index.html"; then
+          if grep -q "sample_enriched_20250101_000000.csv" site/index.html; then
             echo "ERROR: index.html contains sample marker; refusing to publish."
             exit 1
           fi
-
-          echo "---- index.html head ----"
-          head -n 25 "$GITHUB_WORKSPACE/site/index.html" | sed 's/^/[index] /' || true
-          echo "---- archive.html head ----"
-          head -n 25 "$GITHUB_WORKSPACE/site/archive.html" | sed 's/^/[archive] /' || true
-          echo "[timing] build step end: $(date -u +'%Y-%m-%d %H:%M:%S UTC')"
-
-      - name: Git status before commit
-        run: |
-          echo "==== git status (before add) ===="
-          git status
-          echo "==== diff vs HEAD (site/ & data/) ===="
-          git diff --name-only HEAD -- site/ data/ || true
 
       - name: Configure Git
         run: |
           git config user.name  "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
 
-      - name: Verify site/ changed
-        run: |
-          set -e
-          if git diff --quiet HEAD -- site/ data/ ; then
-            echo "ERROR: build produced no changes under site/ or data/."
-            exit 1
-          fi
-
-      - name: Commit and push artifacts (rebase-safe)
+      - name: Commit and push changes
         run: |
           set -euo pipefail
           git pull --rebase origin main || true
           git add site/ data/ || true
-
-          if git diff --cached --quiet ; then
-            echo "No staged changes to commit."
+          if git diff --cached --quiet; then
+            echo "No changes to commit."
             exit 0
           fi
-
           stamp=$(date -u +"%Y-%m-%d %H:%M:%S UTC")
           git commit -m "Auto-build site ${stamp}"
           git push origin HEAD:main
