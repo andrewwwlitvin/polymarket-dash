@@ -21,7 +21,7 @@ concurrency:
 
 env:
   TZ: Europe/Lisbon
-  REUSE_MINUTES: "0"   # >0 minutes = reuse previous CSV within that window
+  PYTHONUNBUFFERED: "1"   # stream logs promptly
 
 jobs:
   build:
@@ -47,23 +47,29 @@ jobs:
             pip install -r requirements.txt
           fi
 
-      # --- Optional fetch step ---
+      # -------- Known-good fetch: no reuse, no timeout wrapper, same flags --------
       - name: Fetch latest markets (fast top-k)
         id: fetch
         run: |
           set -euo pipefail
           mkdir -p data
+          echo "[timing] fetch step start: $(date -u +'%Y-%m-%d %H:%M:%S UTC')"
 
           if [ -f scripts/polymarket_enriched_fast.py ]; then
-            echo "[info] Running fast fetcher…"
-            python scripts/polymarket_enriched_fast.py --topk 120 --concurrency 8
+            echo "[info] Running fast fetcher with --topk 120 --concurrency 8"
+            start=$(date +%s)
+            # timing(1) prints real/user/sys duration
+            time python scripts/polymarket_enriched_fast.py --topk 120 --concurrency 8
+            end=$(date +%s)
+            echo "[timing] fetcher wall time: $((end-start))s"
+
             latest=$(ls -1t polymarket_enriched_fast_*.csv | head -n1 || true)
             if [ -n "${latest:-}" ] && [ -f "$latest" ]; then
               mv -f "$latest" "data/$latest"
               echo "LATEST_CSV=$GITHUB_WORKSPACE/data/$latest" >> "$GITHUB_ENV"
               echo "::notice title=Fetched CSV::data/$latest"
             else
-              echo "[warn] No new CSV produced; will use newest in data/."
+              echo "[warn] No new CSV produced; will use newest in data/ if present."
             fi
           else
             echo "[info] Fast fetcher not present; using CSV already in data/."
@@ -71,25 +77,28 @@ jobs:
 
           echo "List data/ dir (after fetch):"
           ls -lAh data || true
+          echo "[timing] fetch step end: $(date -u +'%Y-%m-%d %H:%M:%S UTC')"
 
-      - name: Generate site (use explicit CSV)
+      - name: Generate site (use explicit CSV if available)
         run: |
           set -euo pipefail
           echo "GITHUB_WORKSPACE=$GITHUB_WORKSPACE"
           echo "LATEST_CSV env: ${LATEST_CSV:-<empty>}"
+          echo "[timing] build step start: $(date -u +'%Y-%m-%d %H:%M:%S UTC')"
 
           if [ -n "${LATEST_CSV:-}" ] && [ -f "$LATEST_CSV" ]; then
             echo "[dbg] CSV head:"
             head -n 2 "$LATEST_CSV" | sed 's/^/[csv head] /' || true
-            python "$GITHUB_WORKSPACE/scripts/build_site_from_csv.py" "$LATEST_CSV"
+            time python "$GITHUB_WORKSPACE/scripts/build_site_from_csv.py" "$LATEST_CSV"
           else
             echo "[dbg] No explicit LATEST_CSV; builder will auto-pick newest in data/."
-            python "$GITHUB_WORKSPACE/scripts/build_site_from_csv.py"
+            time python "$GITHUB_WORKSPACE/scripts/build_site_from_csv.py"
           fi
 
           echo "---- list site/ after build ----"
           ls -lAh "$GITHUB_WORKSPACE/site" || true
 
+          # Guard: ensure we didn't accidentally ship the sample
           if grep -q "sample_enriched_20250101_000000.csv" "$GITHUB_WORKSPACE/site/index.html"; then
             echo "ERROR: index.html contains sample marker; refusing to publish."
             exit 1
@@ -99,6 +108,7 @@ jobs:
           head -n 25 "$GITHUB_WORKSPACE/site/index.html" | sed 's/^/[index] /' || true
           echo "---- archive.html head ----"
           head -n 25 "$GITHUB_WORKSPACE/site/archive.html" | sed 's/^/[archive] /' || true
+          echo "[timing] build step end: $(date -u +'%Y-%m-%d %H:%M:%S UTC')"
 
       - name: Git status before commit
         run: |
