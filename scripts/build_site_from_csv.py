@@ -29,7 +29,7 @@ Outputs:
 - data/desc_history.json (updated)
 """
 
-import sys, csv, math, re, html as html_lib, json, random
+import sys, csv, re, html as html_lib, json, random
 from pathlib import Path
 from datetime import datetime, timezone
 
@@ -73,15 +73,29 @@ def read_csv_rows(csv_path: Path) -> list[dict]:
 def escape(s: str) -> str:
     return html_lib.escape(s, quote=True)
 
-def load_history():
+def load_history() -> dict:
+    """
+    Always return a dict with lists:
+      { "recent_meta": [...], "recent_long": [...] }
+    even if file is missing, empty, malformed, or wrong shape.
+    """
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
     if HISTORY_PATH.exists():
         try:
-            return json.loads(HISTORY_PATH.read_text(encoding="utf-8"))
+            obj = json.loads(HISTORY_PATH.read_text(encoding="utf-8"))
         except Exception:
-            return {"recent_meta": [], "recent_long": []}
-    return {"recent_meta": [], "recent_long": []}
+            obj = {}
+    else:
+        obj = {}
+    if not isinstance(obj, dict):
+        obj = {}
+    if "recent_meta" not in obj or not isinstance(obj.get("recent_meta"), list):
+        obj["recent_meta"] = []
+    if "recent_long" not in obj or not isinstance(obj.get("recent_long"), list):
+        obj["recent_long"] = []
+    return obj
 
-def save_history(hist):
+def save_history(hist: dict):
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     HISTORY_PATH.write_text(json.dumps(hist, ensure_ascii=False, indent=2), encoding="utf-8")
 
@@ -448,8 +462,7 @@ def main():
     # snapshot nav: Home+Archive top; back+forward second row
     # compute neighbors from existing snapshots + this one
     snapshots = sorted(SITE_DIR.glob("dashboard_*.html"))
-    # When building, this new snapshot isn't yet written; neighbors are from existing
-    older = snapshots  # older already existing ones
+    older = snapshots  # existing ones already on disk
     older_names = [p.name for p in older]
     # back href: last older (or archive)
     snap_back = older_names[-1] if older_names else "archive.html"
@@ -490,7 +503,6 @@ def main():
     (SITE_DIR / snap_name).write_text("\n".join(html_snap), encoding="utf-8")
 
     # ---------- Build ARCHIVE (rotating description like index) ----------
-    # forward on archive = oldest snapshot (if any)
     snaps_after_write = sorted(SITE_DIR.glob("dashboard_*.html"))
     oldest = snaps_after_write[0].name if snaps_after_write else None
     head_arch = page_head(
@@ -555,7 +567,7 @@ def main():
     sm.append("</urlset>")
     (SITE_DIR / "sitemap.xml").write_text("\n".join(sm), encoding="utf-8")
 
-    # Save desc history (for rotation)
+    # Save desc history (for rotation) — robust file
     save_history(hist)
 
     print("[ok] Wrote site/index.html, site/archive.html, site/sitemap.xml, site/robots.txt; updated snapshot navs")
