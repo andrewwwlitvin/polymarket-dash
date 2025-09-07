@@ -4,7 +4,7 @@
 import sys, csv, re, json, random, html as html_lib
 from pathlib import Path
 from datetime import datetime, timezone
-from typing import Tuple
+from typing import Tuple, List, Dict, Optional
 
 # =========================================================
 # Config
@@ -65,8 +65,8 @@ def resolve_csv_path() -> Path:
 # =========================================================
 # Data helpers
 # =========================================================
-def read_rows(csv_path: Path) -> list[dict]:
-    rows: list[dict] = []
+def read_rows(csv_path: Path) -> List[Dict]:
+    rows: List[Dict] = []
     with csv_path.open("r", encoding="utf-8", newline="") as f:
         reader = csv.DictReader(f)
         for r in reader:
@@ -90,7 +90,7 @@ def fmt_money(n) -> str:
     except Exception:
         return "—"
 
-def ttr_badge(days_str: str | None) -> str:
+def ttr_badge(days_str: Optional[str]) -> str:
     if not days_str:
         return "TTR —"
     d = num(days_str)
@@ -100,7 +100,7 @@ def ttr_badge(days_str: str | None) -> str:
         return "TTR Ended"
     return f"TTR {d:.1f}d"
 
-def pick_hot_and_gems(rows: list[dict], k: int = 12):
+def pick_hot_and_gems(rows: List[Dict], k: int = 12):
     """HOT: highest 24h volume then nearest resolve; GEMS: near50 & underround with moderate volume."""
     enriched = []
     for r in rows:
@@ -117,10 +117,10 @@ def pick_hot_and_gems(rows: list[dict], k: int = 12):
 # =========================================================
 # Rollover previous index into snapshot
 # =========================================================
-def rollover_previous_index_to_snapshot(site_dir: Path) -> str | None:
+def rollover_previous_index_to_snapshot(site_dir: Path) -> Optional[str]:
     """
     If site/index.html exists, extract hidden build marker <!-- build_ts: YYYY-MM-DD_HHMM -->
-    and write it as site/dashboard_<ts>.html (only if not exists).
+    and write it as site/dashboard_<ts>.html (only if not exists). This snapshots the PREVIOUS run.
     """
     idx = site_dir / "index.html"
     if not idx.exists():
@@ -139,7 +139,7 @@ def rollover_previous_index_to_snapshot(site_dir: Path) -> str | None:
 # =========================================================
 # Description rotation (meta + long)
 # =========================================================
-def _list_files(dirpath: Path, exts: Tuple[str, ...]) -> list[Path]:
+def _list_files(dirpath: Path, exts: Tuple[str, ...]) -> List[Path]:
     if not dirpath.exists():
         return []
     out = []
@@ -160,7 +160,7 @@ def _save_history(h: dict):
     DESC_HISTORY.parent.mkdir(parents=True, exist_ok=True)
     DESC_HISTORY.write_text(json.dumps(h, ensure_ascii=False, indent=2), encoding="utf-8")
 
-def _pick_without_recent(paths: list[Path], recent: list[str], keep_last: int) -> Path | None:
+def _pick_without_recent(paths: List[Path], recent: List[str], keep_last: int) -> Optional[Path]:
     if not paths:
         return None
     pool = [p for p in paths if p.name not in recent]
@@ -174,7 +174,7 @@ def _strip_html(s: str) -> str:
 def choose_descriptions() -> tuple[str, str, str, str]:
     """
     Returns: (meta_text, long_html, meta_filename, long_filename)
-    - meta_text: <= 160 chars (will be used in <meta name="description">)
+    - meta_text: <= 160 chars (used in <meta name="description">)
     - long_html: injected visibly into Description section (HTML allowed)
     """
     META_DIR.mkdir(parents=True, exist_ok=True)
@@ -282,7 +282,7 @@ body {{ margin:0; font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI
 # =========================================================
 # Market card with accessibility + fallback
 # =========================================================
-def render_market_card(row: dict) -> str:
+def render_market_card(row: Dict) -> str:
     title = row.get("question") or "(Untitled market)"
     why   = row.get("why") or (row.get("category") or "—")
     embed = row.get("embedSrc") or ""
@@ -296,7 +296,6 @@ def render_market_card(row: dict) -> str:
         f"Embedded market card unavailable without JavaScript. "
         f"Visit the market page to view details."
     )
-    # If we have a direct URL to the market, use it in caption; else fallback to title only.
     market_url = row.get("url") or ""
     caption = f"{title}" + (f" — View on Polymarket: {html_lib.escape(market_url)}" if market_url else "")
 
@@ -321,7 +320,7 @@ def render_market_card(row: dict) -> str:
 </div>
 """.strip()
 
-def render_section(title: str, rows: list[dict]) -> str:
+def render_section(title: str, rows: List[Dict]) -> str:
     cards = "\n".join(render_market_card(r) for r in rows)
     return f"""
 <div class="section">
@@ -333,10 +332,13 @@ def render_section(title: str, rows: list[dict]) -> str:
 """.strip()
 
 # =========================================================
-# Pages
+# Pages (navigation rules as specified)
 # =========================================================
-def render_index_html(now_local_str: str, build_ts: str, hot: list[dict], gems: list[dict],
-                      meta_desc: str, long_desc_html: str) -> str:
+def render_index_html(now_local_str: str, build_ts: str, hot: List[Dict], gems: List[Dict],
+                      meta_desc: str, long_desc_html: str, newest_snapshot: Optional[str]) -> str:
+    """
+    Home: only Back → to previous snapshot (newest existing). If no snapshots yet, hide nav.
+    """
     title = f"Hottest Markets & Overlooked Chances on Polymarket Today — {now_local_str}"
     desc = meta_desc
     page_url = f"{SITE_BASE}/index.html"
@@ -346,10 +348,19 @@ def render_index_html(now_local_str: str, build_ts: str, hot: list[dict], gems: 
     hot_sec = render_section("HOT (Top 12)", hot[:12])
     gem_sec = render_section("Overlooked (Top 12)", gems[:12])
 
-    nav = f"""
+    if newest_snapshot:
+        nav = f"""
+<!-- NAV_START -->
 <div class="navrow">
-  <a class="btn" href="{SITE_BASE}/archive.html">Back →</a>
+  <a class="btn" href="{html_lib.escape(newest_snapshot)}">Back →</a>
 </div>
+<!-- NAV_END -->
+"""
+    else:
+        nav = """
+<!-- NAV_START -->
+<div class="navrow" aria-hidden="true" style="visibility:hidden;height:0;margin:0;padding:0;"></div>
+<!-- NAV_END -->
 """
 
     methodology = f"""
@@ -394,27 +405,40 @@ def render_index_html(now_local_str: str, build_ts: str, hot: list[dict], gems: 
 </body>"""
     return f"<!doctype html><html lang=\"en\">{head}{body}</html>"
 
-def render_archive_html(now_local_str: str, build_ts: str, snapshots: list[str]) -> str:
+def render_archive_html(now_local_str: str, build_ts: str, snapshots: List[str]) -> str:
+    """
+    Archive: only ← Forward to oldest snapshot (if exists).
+    """
     title = "Polymarket Dashboards — Archive"
     desc = "Browse historical snapshots; updated every 6 hours. Hottest markets & overlooked chances."
     page_url = f"{SITE_BASE}/archive.html"
     iso_now = datetime.now(timezone.utc).isoformat(timespec="seconds")
     head = html_head(title, page_url, desc, iso_now, build_ts)
 
-    def sort_key(name: str) -> str:
-        m = re.search(r"dashboard_([0-9]{4}-[0-9]{2}-[0-9]{2}_[0-9]{4})\.html", name)
-        return m.group(1) if m else name
-    snapshots_sorted = sorted(snapshots, key=sort_key, reverse=True)
-
-    items = []
-    for fn in snapshots_sorted:
+    # snapshots is newest→oldest from caller
+    # For labels and list:
+    def label_for(fn: str) -> str:
         m = re.search(r"dashboard_([0-9]{4}-[0-9]{2}-[0-9]{2})_([0-9]{4})\.html", fn)
-        label = fn
-        if m:
-            d, hm = m.group(1), m.group(2)
-            label = f"{d} • {hm[:2]}:{hm[2:]}"
-        items.append(f'<li><a class="btn" href="{html_lib.escape(fn)}">{html_lib.escape(label)}</a></li>')
-    lis = "\n".join(items) if items else "<li>No snapshots yet.</li>"
+        if not m: return fn
+        d, hm = m.group(1), m.group(2)
+        return f"{d} • {hm[:2]}:{hm[2:]}"
+
+    lis = "\n".join(
+        f'<li><a class="btn" href="{html_lib.escape(fn)}">{html_lib.escape(label_for(fn))}</a></li>'
+        for fn in snapshots
+    ) or "<li>No snapshots yet.</li>"
+
+    oldest = snapshots[-1] if snapshots else None
+    if oldest:
+        nav_html = f'''
+<div class="navrow">
+  <a class="btn" href="{html_lib.escape(oldest)}">← Forward</a>
+</div>
+'''
+    else:
+        nav_html = '''
+<div class="navrow" aria-hidden="true" style="visibility:hidden;height:0;margin:0;padding:0;"></div>
+'''
 
     body = f"""<body>
 <div class="container">
@@ -424,9 +448,7 @@ def render_archive_html(now_local_str: str, build_ts: str, snapshots: list[str])
     <div class="source">Source: Polymarket API data.</div>
   </div>
 
-  <div class="navrow">
-    <a class="btn" href="{SITE_BASE}/index.html">← Forward</a>
-  </div>
+  {nav_html}
 
   <div class="section">
     <h2>Snapshots</h2>
@@ -447,7 +469,7 @@ def render_archive_html(now_local_str: str, build_ts: str, snapshots: list[str])
 # =========================================================
 # Sitemap & robots
 # =========================================================
-def write_sitemap_xml(site_dir: Path, site_base: str, pages: list[dict]):
+def write_sitemap_xml(site_dir: Path, site_base: str, pages: List[Dict]):
     out = site_dir / "sitemap.xml"
     lines = [
         '<?xml version="1.0" encoding="UTF-8"?>',
@@ -471,9 +493,49 @@ def write_robots_txt(site_dir: Path, site_base: str):
     )
 
 # =========================================================
+# Snapshot NAV rewriter (post-build)
+# =========================================================
+def update_snapshot_navs(site_dir: Path):
+    """
+    Snapshot pages: Forward -> newer snapshot (or index.html if none)
+                    Back    -> older snapshot (or archive.html if none)
+    """
+    snaps = sorted(site_dir.glob("dashboard_*.html"), key=lambda p: p.name, reverse=True)  # newest → oldest
+    if not snaps:
+        return
+
+    for idx, snap_path in enumerate(snaps):
+        html = snap_path.read_text(encoding="utf-8", errors="ignore")
+
+        newer = snaps[idx - 1].name if idx - 1 >= 0 else None         # toward newer
+        older = snaps[idx + 1].name if idx + 1 < len(snaps) else None # toward older
+
+        back_href = older if older else "archive.html"
+        fwd_href  = newer if newer else "index.html"
+
+        new_nav = f"""
+<!-- NAV_START -->
+<div class="navrow">
+  <a class="btn" href="{html_lib.escape(fwd_href)}">← Forward</a>
+  <a class="btn" href="{html_lib.escape(back_href)}">Back →</a>
+</div>
+<!-- NAV_END -->
+""".strip()
+
+        html_new = re.sub(
+            r"<!--\s*NAV_START\s*-->.*?<!--\s*NAV_END\s*-->",
+            new_nav,
+            html,
+            flags=re.DOTALL
+        )
+        if html_new != html:
+            snap_path.write_text(html_new, encoding="utf-8")
+
+# =========================================================
 # Main
 # =========================================================
 def main():
+    random.seed()  # ensure varied description selection
     csv_path = resolve_csv_path()
     print(f"[builder] Using CSV: {csv_path}")
 
@@ -487,32 +549,41 @@ def main():
     if rolled:
         print(f"[builder] Rolled previous index into snapshot: {rolled}")
 
+    # Gather current snapshot list (newest → oldest)
+    snapshots = sorted([p.name for p in SITE_DIR.glob("dashboard_*.html")], reverse=True)
+    newest_snap = snapshots[0] if snapshots else None
+
     # 2) Choose SEO descriptions
     meta_desc, long_desc_html, meta_name, long_name = choose_descriptions()
     print(f"[builder] Using meta: {meta_name} | long: {long_name}")
 
-    # 3) Build current pages (index + archive) — no current snapshot
+    # 3) Build current pages (index + archive) — no current snapshot duplication
     now = datetime.now(timezone.utc)
     build_ts = now.strftime(TIMESTAMP_FMT)
     now_local_str = now.astimezone().strftime("%d %B %Y • %H:%M")
 
-    index_html = render_index_html(now_local_str, build_ts, hot, gems, meta_desc, long_desc_html)
+    index_html = render_index_html(now_local_str, build_ts, hot, gems, meta_desc, long_desc_html, newest_snap)
     (SITE_DIR / "index.html").write_text(index_html, encoding="utf-8")
 
-    snaps = [p.name for p in SITE_DIR.glob("dashboard_*.html")]
-    archive_html = render_archive_html(now_local_str, build_ts, snaps)
+    # refresh snapshot list in case none existed before (index written regardless)
+    snapshots = sorted([p.name for p in SITE_DIR.glob("dashboard_*.html")], reverse=True)
+
+    archive_html = render_archive_html(now_local_str, build_ts, snapshots)
     (SITE_DIR / "archive.html").write_text(archive_html, encoding="utf-8")
 
-    # 4) SEO assets
+    # 4) SEO assets (always write)
     iso_now = now.isoformat(timespec="seconds")
     pages = [
         {"loc": f"{SITE_BASE}/index.html", "lastmod": iso_now},
         {"loc": f"{SITE_BASE}/archive.html", "lastmod": iso_now},
-    ] + [{"loc": f"{SITE_BASE}/{name}", "lastmod": iso_now} for name in snaps]
+    ] + [{"loc": f"{SITE_BASE}/{name}", "lastmod": iso_now} for name in snapshots]
     write_sitemap_xml(SITE_DIR, SITE_BASE, pages)
     write_robots_txt(SITE_DIR, SITE_BASE)
 
-    print("[ok] Wrote site/index.html and site/archive.html (no current snapshot)")
+    # 5) After all pages exist, rewrite snapshot navs
+    update_snapshot_navs(SITE_DIR)
+
+    print("[ok] Wrote site/index.html, site/archive.html, site/sitemap.xml, site/robots.txt, and updated snapshot navs")
 
 if __name__ == "__main__":
     main()
