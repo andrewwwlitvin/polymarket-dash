@@ -2,28 +2,27 @@ name: Build and publish dashboards
 
 on:
   schedule:
-    - cron: "0 */6 * * *"   # every 6 hours (UTC)
+    - cron: "0 */6 * * *"     # every 6 hours (UTC)
   workflow_dispatch:
 
 permissions:
-  contents: write
+  contents: write              # allow pushes from the workflow
 
 jobs:
   build:
     runs-on: ubuntu-latest
-    timeout-minutes: 25      # optional: cap the entire job
-    concurrency:
+    timeout-minutes: 30
+    concurrency:               # avoid two overlapping pushes on the same ref
       group: deploy-${{ github.ref }}
       cancel-in-progress: false
-      
     env:
-      TZ: Europe/Lisbon
+      TZ: Europe/Lisbon        # timestamps printed inside pages
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
         with:
-          fetch-depth: 0
+          fetch-depth: 0       # needed for rebase-safe push
 
       - name: Setup Python
         uses: actions/setup-python@v5
@@ -34,11 +33,14 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
-          
+
+      # ============================
+      # 1) FETCH LATEST CSV (FAST)
+      # ============================
       - name: Fetch latest markets (fast top-k)
         timeout-minutes: 15
         env:
-          PYTHONUNBUFFERED: "1"
+          PYTHONUNBUFFERED: "1"    # unbuffered logs from Python
         run: |
           set -euo pipefail
 
@@ -47,19 +49,23 @@ jobs:
           DATA_DIR="$WORKDIR/data"
           mkdir -p "$DATA_DIR"
 
-          # Reuse CSV if <5h old
+          echo "---- repo root listing ----"
+          ls -lAh "$WORKDIR" || true
+
+          # Reuse a CSV produced in the last 5 hours to avoid re-fetch when not needed
           recent=$(find "$DATA_DIR" -maxdepth 1 -type f -name 'polymarket_enriched_fast_*.csv' -mmin -300 | sort | tail -n1 || true)
           if [ -n "${recent:-}" ]; then
             echo "Using recent CSV: $recent"
             echo "LATEST_CSV=$recent" >> "$GITHUB_ENV"
           else
             echo "No recent CSV; fetching a new one…"
+            # NOTE: adjust flags if you like (e.g., --topk 100 for quicker CI runs)
             python -u "$WORKDIR/scripts/polymarket_enriched_fast.py" \
               --topk 120 \
               --concurrency 8 \
               --fast
 
-            echo "Search for new CSVs (top-level and scripts/):"
+            echo "---- search for new CSVs at repo top level and scripts/ ----"
             find "$WORKDIR" -maxdepth 2 -type f -name 'polymarket_enriched_fast_*.csv' -printf '%TY-%Tm-%Td %TH:%TM %p\n' | sort || true
 
             latest=$(find "$WORKDIR" -maxdepth 2 -type f -name 'polymarket_enriched_fast_*.csv' | sort | tail -n1 || true)
@@ -74,12 +80,16 @@ jobs:
             echo "LATEST_CSV=$DATA_DIR/$base" >> "$GITHUB_ENV"
           fi
 
-          echo "List data dir:"
+          echo "---- list data/ ----"
           ls -lAh "$DATA_DIR" || true
-          
+
+      # ===========================================
+      # 2) BUILD SITE FROM THAT EXACT CSV (STRICT)
+      # ===========================================
       - name: Generate site (use explicit CSV)
         run: |
           set -euo pipefail
+
           echo "GITHUB_WORKSPACE=$GITHUB_WORKSPACE"
           echo "LATEST_CSV env: ${LATEST_CSV:-<empty>}"
 
@@ -98,25 +108,53 @@ jobs:
           head -n 2 "$LATEST_CSV" | sed 's/^/[csv head] /' || true
 
           python "$GITHUB_WORKSPACE/scripts/build_site_from_csv.py" "$LATEST_CSV"
-          
+
+          echo "---- list site/ after build ----"
+          ls -lAh "$GITHUB_WORKSPACE/site" || true
+
+          # HARD GUARD: fail if builder accidentally wrote sample pages
+          if grep -q "sample_enriched_20250101_000000.csv" "$GITHUB_WORKSPACE/site/index.html"; then
+            echo "ERROR: index.html contains sample marker; refusing to publish."
+            exit 1
+          fi
+
+          # Show the first lines of the HTML for debugging
+          echo "---- index.html head ----"
+          head -n 25 "$GITHUB_WORKSPACE/site/index.html" | sed 's/^/[index] /' || true
+          echo "---- archive.html head ----"
+          head -n 25 "$GITHUB_WORKSPACE/site/archive.html" | sed 's/^/[arch ] /' || true
+
+      # =======================================================
+      # 3) COMMIT & PUSH (REBASE-SAFE; AVOID RACE CONDITIONS)
+      # =======================================================
       - name: Configure Git
         run: |
           git config --global --add safe.directory "$GITHUB_WORKSPACE"
           git config user.name  "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
 
-      - name: Commit and push artifacts
+      - name: Commit and push artifacts (rebase-safe)
+        env:
+          BRANCH_NAME: ${{ github.ref_name }}
         run: |
           set -e
+
+          # Stage generated changes (site/, data/ etc.)
           git add -A
+
           if git diff --cached --quiet; then
             echo "Nothing to commit"; exit 0
           fi
-          git pull --rebase --autostash origin "$GITHUB_REF_NAME" || true
-          if git push origin HEAD:"$GITHUB_REF_NAME"; then
-            echo "Push ok"
+
+          # Rebase on latest remote to avoid non-fast-forward rejects
+          git fetch origin "$BRANCH_NAME" --depth=1 || true
+          git pull --rebase --autostash origin "$BRANCH_NAME" || true
+
+          # Try push; if rejected, retry once after rebase
+          if git push origin HEAD:"$BRANCH_NAME"; then
+            echo "Push succeeded"
           else
-            echo "Push failed; retrying after rebase"
-            git pull --rebase --autostash origin "$GITHUB_REF_NAME" || true
-            git push origin HEAD:"$GITHUB_REF_NAME"
+            echo "Push rejected; retrying after rebase…"
+            git pull --rebase --autostash origin "$BRANCH_NAME" || true
+            git push origin HEAD:"$BRANCH_NAME"
           fi
