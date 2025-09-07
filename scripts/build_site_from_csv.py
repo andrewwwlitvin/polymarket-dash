@@ -15,11 +15,11 @@ META_DIR        = Path("content/meta")   # short, plain-text (<=160 chars)
 LONG_DIR        = Path("content/long")   # long HTML (visible)
 DESC_HISTORY    = Path("data/desc_history.json")
 RECENT_WINDOW   = 30
-SITE_BASE       = "https://urbanpoly.com"  # change if needed
-STAMP_FMT       = "%Y-%m-%d_%H%M%S"         # <— seconds to avoid collisions
+SITE_BASE       = "https://urbanpoly.com"   # change if needed
+STAMP_FMT       = "%Y-%m-%d_%H%M%S"          # seconds to avoid collisions
 
 # =========================
-# CSV
+# CSV helpers
 # =========================
 def resolve_csv_path() -> Path:
     if len(sys.argv) > 1 and sys.argv[1]:
@@ -135,13 +135,13 @@ def _save_history(h: dict):
     DESC_HISTORY.parent.mkdir(parents=True, exist_ok=True)
     DESC_HISTORY.write_text(json.dumps(h, ensure_ascii=False, indent=2), encoding="utf-8")
 
+def _strip_html(s: str) -> str:
+    return re.sub(r"<[^>]*>", "", s or "").strip()
+
 def _pick_without_recent(paths: List[Path], recent: List[str]) -> Optional[Path]:
     if not paths: return None
     pool = [p for p in paths if p.name not in recent] or paths
     return random.choice(pool)
-
-def _strip_html(s: str) -> str:
-    return re.sub(r"<[^>]*>", "", s or "").strip()
 
 def choose_descriptions() -> tuple[str, str, str, str]:
     META_DIR.mkdir(parents=True, exist_ok=True)
@@ -213,7 +213,7 @@ body {{ margin:0; font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI
 .header h1 {{ margin:0; font-size: 34px; font-variant: small-caps; letter-spacing: .5px; }}
 .header .date {{ color: var(--fg); font-size: 20px; font-weight: 600; margin-top: 6px; }}
 .header .source {{ color: var(--muted); font-size: 14px; margin-top: 6px; }}
-.navrow {{ display:flex; align-items:center; gap:12px; margin: 8px 0 18px; }}
+.navrow {{ display:flex; align-items:center; gap:12px; margin: 8px 0 18px; flex-wrap: wrap; }}
 .btn {{ display:inline-flex; align-items:center; gap:8px; padding:10px 14px; border:1px solid var(--border); border-radius: 14px; background:transparent; color:var(--fg); text-decoration:none; font-weight:700; }}
 .btn:hover {{ background:#111322; }}
 .tabs {{ display:grid; grid-template-columns: 1fr 1fr; border:1px solid var(--border); border-radius: 14px; overflow: hidden; margin: 12px 0 22px; }}
@@ -269,14 +269,16 @@ def market_card(row: Dict) -> str:
 """.strip()
 
 def section(title: str, rows: List[Dict]) -> str:
-    return f"""
-<div class="section">
-  <h2>{html_lib.escape(title)}</h2>
-  <div class="grid">
-    { "\n".join(market_card(r) for r in rows) }
-  </div>
-</div>
-""".strip()
+    # Precompute inner HTML to avoid backslashes in f-string expression
+    cards_html = "\n".join(market_card(r) for r in rows)
+    return (
+        "<div class=\"section\">"
+        f"<h2>{html_lib.escape(title)}</h2>"
+        "<div class=\"grid\">"
+        f"{cards_html}"
+        "</div>"
+        "</div>"
+    )
 
 # =========================
 # Pages (nav rules + Home/Archive buttons)
@@ -290,7 +292,7 @@ def render_index(now_text: str, build_ts: str, hot: List[Dict], gems: List[Dict]
     head = html_head(title, page_url, meta_desc, iso_now, build_ts, nonce)
 
     # Home: show only Archive button; Back → previous snapshot
-    home_arch = f'<a class="btn" href="archive.html">Archive</a>'
+    home_arch = '<a class="btn" href="archive.html">Archive</a>'
     back_btn  = f'<a class="btn" href="{html_lib.escape(newest_snapshot)}">Back →</a>' if newest_snapshot else ""
 
     hot_sec = section("HOT (Top 12)", hot[:12])
@@ -356,10 +358,10 @@ def render_archive(now_text: str, build_ts: str, snapshots: List[str]) -> str:
         d, hms = m.group(1), m.group(2)
         return f"{d} • {hms[:2]}:{hms[2:4]}:{hms[4:]}"
 
-    lis = "\n".join(
-        f'<li><a class="btn" href="{html_lib.escape(fn)}">{html_lib.escape(label(fn))}</a></li>'
-        for fn in snapshots
-    ) or "<li>No snapshots yet.</li>"
+    items = []
+    for fn in snapshots:
+        items.append(f'<li><a class="btn" href="{html_lib.escape(fn)}">{html_lib.escape(label(fn))}</a></li>')
+    list_html = "\n".join(items) if items else "<li>No snapshots yet.</li>"
 
     body = f"""<body>
 <div class="container">
@@ -377,7 +379,7 @@ def render_archive(now_text: str, build_ts: str, snapshots: List[str]) -> str:
   <div class="section">
     <h2>Snapshots</h2>
     <ul style="list-style:none; padding:0; display:grid; grid-template-columns:repeat(1,minmax(0,1fr)); gap:10px;">
-      {lis}
+      {list_html}
     </ul>
   </div>
 
@@ -426,17 +428,16 @@ def rewrite_snapshot_navs(site_dir: Path):
         older = snaps[idx+1].name if idx+1 < len(snaps) else None
         back_href = older if older else "archive.html"
         fwd_href  = newer if newer else "index.html"
-        # add Home/Archive persistent
-        new_nav = f"""
-<!-- NAV_START -->
-<div class="navrow">
-  <a class="btn" href="index.html">Home</a>
-  <a class="btn" href="archive.html">Archive</a>
-  <a class="btn" href="{html_lib.escape(fwd_href)}">← Forward</a>
-  <a class="btn" href="{html_lib.escape(back_href)}">Back →</a>
-</div>
-<!-- NAV_END -->
-""".strip()
+        new_nav = (
+            "<!-- NAV_START -->"
+            "<div class=\"navrow\">"
+            "<a class=\"btn\" href=\"index.html\">Home</a>"
+            "<a class=\"btn\" href=\"archive.html\">Archive</a>"
+            f"<a class=\"btn\" href=\"{html_lib.escape(fwd_href)}\">← Forward</a>"
+            f"<a class=\"btn\" href=\"{html_lib.escape(back_href)}\">Back →</a>"
+            "</div>"
+            "<!-- NAV_END -->"
+        )
         html_new = re.sub(r"<!--\s*NAV_START\s*-->.*?<!--\s*NAV_END\s*-->", new_nav, html, flags=re.DOTALL)
         if html_new != html:
             snap.write_text(html_new, encoding="utf-8")
@@ -472,12 +473,14 @@ def main():
     now_text = now.astimezone().strftime("%d %B %Y • %H:%M")
     iso_now  = now.isoformat(timespec="seconds")
 
+    # index
     index_html = render_index(now_text, build_ts, hot, gems, meta_desc, long_html, newest_snap)
     (SITE_DIR / "index.html").write_text(index_html, encoding="utf-8")
 
-    # refresh snapshots list (in case there were none before)
+    # refresh list
     snapshots = sorted([p.name for p in SITE_DIR.glob("dashboard_*.html")], reverse=True)
 
+    # archive
     archive_html = render_archive(now_text, build_ts, snapshots)
     (SITE_DIR / "archive.html").write_text(archive_html, encoding="utf-8")
 
