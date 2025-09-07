@@ -47,21 +47,29 @@ jobs:
             pip install -r requirements.txt
           fi
 
-      # === Fetch CSV with explicit arguments ===
-      - name: Fetch latest markets
+      # -------- Fixed fetch step: always uses topk=120 --------
+      - name: Fetch latest markets (fast top-k)
         run: |
           set -euo pipefail
           mkdir -p data
-          echo "[fetch] REUSE_MINUTES=$REUSE_MINUTES"
-          echo "[fetch] Fetching a NEW CSV..."
+          echo "[timing] fetch step start: $(date -u +'%Y-%m-%d %H:%M:%S UTC')"
+          start=$(date +%s)
+
+          echo "[info] Running fast fetcher with --topk 120 --concurrency 8"
           python scripts/polymarket_enriched_fast.py --topk 120 --concurrency 8
+
+          end=$(date +%s)
+          echo "[timing] fetcher wall time: $((end-start))s"
+
           latest=$(ls -1t polymarket_enriched_fast_*.csv | head -n1)
           if [ -n "$latest" ]; then
             mv "$latest" "data/$latest"
             echo "LATEST_CSV=$GITHUB_WORKSPACE/data/$latest" >> "$GITHUB_ENV"
             echo "::notice title=Fetched CSV::data/$latest"
           fi
+
           ls -lAh data || true
+          echo "[timing] fetch step end: $(date -u +'%Y-%m-%d %H:%M:%S UTC')"
 
       - name: Generate site
         run: |
