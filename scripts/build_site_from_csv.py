@@ -14,15 +14,17 @@ What this script does:
 - Generates DYNAMIC OG image (1200x630) into /site/og-preview.png each run
 - Writes robots.txt and sitemap.xml
 
-Inputs:
+Usage:
   python scripts/build_site_from_csv.py data/polymarket_enriched_fast_YYYYMMDD_HHMMSS.csv
+
+Requires:
+  Pillow (for dynamic OG image). If missing, OG generation is skipped gracefully.
 """
 
 from __future__ import annotations
 
 import csv
 import html as html_lib
-import io
 import json
 import os
 import random
@@ -43,7 +45,7 @@ DATA_DIR = ROOT / "data"
 CONTENT_META_DIR = ROOT / "content" / "meta"
 CONTENT_LONG_DIR = ROOT / "content" / "long"
 HISTORY_PATH = DATA_DIR / "desc_history.json"
-ASSETS_DIR = ROOT / "assets"  # favicons may live here (optional)
+ASSETS_DIR = ROOT / "assets"  # favicons live here (optional)
 
 NO_REPEAT_WINDOW = 30
 
@@ -66,7 +68,7 @@ FAVICON_FILES = [
     "favicon.ico",
 ]
 
-# We will always write site/og-preview.png dynamically each run.
+# We always write site/og-preview.png dynamically each run.
 OG_IMAGE_BASENAME = "og-preview.png"
 
 # -------------------------
@@ -176,10 +178,12 @@ def copy_if_exists(src: Path, dst: Path):
         shutil.copy2(src, dst)
 
 def copy_favicons():
+    # Copy to site/ so Vercel serves them
     for name in FAVICON_FILES:
         copy_if_exists(ASSETS_DIR / name, SITE_DIR / name)
 
 def favicon_links_html() -> str:
+    # Pages expect icons at site root (we copy them there each build)
     return """
 <link rel="icon" type="image/png" sizes="16x16" href="/favicon-16x16.png">
 <link rel="icon" type="image/png" sizes="32x32" href="/favicon-32x32.png">
@@ -239,9 +243,16 @@ def build_meta_block(page_title: str, description: str, canonical_path: str) -> 
 {favicon_links_html()}
 """.strip()
 
+# -------------------------
+# Card / grid rendering
+# -------------------------
 def embed_card_html(m: Market) -> str:
-    cap = f"{html_lib.escape(m.title)} — View: {html_lib.escape(m.url)}"
-    caption = f'<p class="cap"><a href="{html_lib.escape(m.url)}" target="_blank" rel="noopener noreferrer">{html_lib.escape(m.title)}</a> — <a href="{html_lib.escape(m.url)}" target="_blank" rel="noopener noreferrer">{html_lib.escape(m.url)}</a></p>'
+    caption = (
+        f'<p class="cap"><a href="{html_lib.escape(m.url)}" target="_blank" rel="noopener noreferrer">'
+        f'{html_lib.escape(m.title)}</a> — '
+        f'<a href="{html_lib.escape(m.url)}" target="_blank" rel="noopener noreferrer">'
+        f'{html_lib.escape(m.url)}</a></p>'
+    )
     stat_boxes = f"""
 <div class="stats">
   <div class="stat"><div class="label">24h Vol</div><div class="val">{fmt_money(m.vol24)}</div></div>
@@ -255,7 +266,7 @@ def embed_card_html(m: Market) -> str:
     <iframe title="{html_lib.escape(m.title)}" aria-label="{html_lib.escape(m.title)}"
             src="{html_lib.escape(m.embed_src)}" loading="lazy"
             referrerpolicy="no-referrer-when-downgrade"></iframe>
-    <noscript><p>{cap}</p></noscript>
+    <noscript>{caption}</noscript>
     {caption}
   </div>
   <h3 class="mt">{html_lib.escape(m.title)}</h3>
@@ -305,8 +316,8 @@ body { margin:0; font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI,
 """.strip()
 
 def render_nav(home: bool, archive: bool, back_href: Optional[str], fwd_href: Optional[str]) -> str:
-    home_btn = "" if home else f'<a class="btn" href="/index.html">← Home</a>'
-    archive_btn = "" if archive else f'<a class="btn" href="/archive.html">Archive →</a>'
+    home_btn = "" if home else '<a class="btn" href="/index.html">← Home</a>'
+    archive_btn = "" if archive else '<a class="btn" href="/archive.html">Archive →</a>'
     forward_btn = f'<a class="btn" href="{html_lib.escape(fwd_href)}">← Forward</a>' if fwd_href else ""
     back_btn = f'<a class="btn" href="{html_lib.escape(back_href)}">Back →</a>' if back_href else ""
     return f"""
@@ -337,6 +348,9 @@ def build_tabs(hot_active: bool) -> str:
   <a href="#hot" class="{ 'active' if hot_active else '' }">Hottest</a>
   <a href="#overlooked" class="{ '' if hot_active else 'active' }">Overlooked</a>
 </div>""".strip()
+
+def list_existing_snapshots() -> List[Path]:
+    return sorted(SITE_DIR.glob("dashboard_*.html"))
 
 def pick_descriptions() -> Tuple[str, str, str, str]:
     meta_files = list_files_sorted(CONTENT_META_DIR, ".txt")
@@ -402,7 +416,7 @@ def generate_og_image(hot: List[Market], date_str: str, time_str: str):
     for i in range(W):
         r = int(110 + (168-110) * (i/W))
         g = int(168 + (121-168) * (i/W))
-        b = int(254 + (254-254) * (i/W))
+        b = 254
         d.line([(i, 0), (i, 14)], fill=(r, g, b))
 
     # Fonts (fallback to default)
@@ -442,7 +456,8 @@ def generate_og_image(hot: List[Market], date_str: str, time_str: str):
         cy = y + i*row_gap + 34
         chips = [f"24h {fmt_money(m.vol24)}", f"spread {fmt_num(m.spread,3)}", f"TTR {fmt_ttr(m.ttr_days)}"]
         for chip in chips:
-            w, h = d.textlength(chip, font=font_chip), 26
+            w = d.textlength(chip, font=font_chip)
+            h = 26
             box_w = int(w) + 20
             d.rounded_rectangle([cx, cy, cx+box_w, cy+h+10], radius=8, outline=(100,100,120), width=2, fill=None)
             d.text((cx+10, cy+5), chip, fill=(180,184,196), font=font_chip, anchor="ls")
@@ -468,6 +483,7 @@ def build_index_html(hot: List[Market], gems: List[Market], date_str: str, time_
     ld = [json_ld_website(), json_ld_webpage(page_title, f"{SITE_HOST}/index.html", meta_desc, is_collection=True)]
     ld_json = json.dumps(ld, ensure_ascii=False, indent=2)
 
+    # NOTE: escape curly braces in JS within an f-string using doubled {{ }}
     return f"""<!doctype html><html lang='en'>
 <head>
 {head}
@@ -504,18 +520,18 @@ def build_index_html(hot: List[Market], gems: List[Market], date_str: str, time_
   </div>
 
 <script>
-(function(){
-  function show(id){ 
+(function(){{
+  function show(id){{ 
     document.querySelector('#hot').style.display = (id==='hot')?'grid':'none';
     document.querySelector('#overlooked').style.display = (id==='overlooked')?'grid':'none';
     var tabs = document.querySelectorAll('.tabs a');
     tabs[0].classList.toggle('active', id==='hot');
     tabs[1].classList.toggle('active', id==='overlooked');
-  }
-  document.querySelectorAll('.tabs a')[0].addEventListener('click', function(e){ e.preventDefault(); show('hot'); });
-  document.querySelectorAll('.tabs a')[1].addEventListener('click', function(e){ e.preventDefault(); show('overlooked'); });
+  }}
+  document.querySelectorAll('.tabs a')[0].addEventListener('click', function(e){{ e.preventDefault(); show('hot'); }});
+  document.querySelectorAll('.tabs a')[1].addEventListener('click', function(e){{ e.preventDefault(); show('overlooked'); }});
   show('hot');
-})();
+}})();
 </script>
 
 </body></html>
@@ -566,18 +582,18 @@ def build_snapshot_html(hot: List[Market], gems: List[Market], date_str: str, ti
   </div>
 
 <script>
-(function(){
-  function show(id){ 
+(function(){{
+  function show(id){{ 
     document.querySelector('#hot').style.display = (id==='hot')?'grid':'none';
     document.querySelector('#overlooked').style.display = (id==='overlooked')?'grid':'none';
     var tabs = document.querySelectorAll('.tabs a');
     tabs[0].classList.toggle('active', id==='hot');
     tabs[1].classList.toggle('active', id==='overlooked');
-  }
-  document.querySelectorAll('.tabs a')[0].addEventListener('click', function(e){ e.preventDefault(); show('hot'); });
-  document.querySelectorAll('.tabs a')[1].addEventListener('click', function(e){ e.preventDefault(); show('overlooked'); });
+  }}
+  document.querySelectorAll('.tabs a')[0].addEventListener('click', function(e){{ e.preventDefault(); show('hot'); }});
+  document.querySelectorAll('.tabs a')[1].addEventListener('click', function(e){{ e.preventDefault(); show('overlooked'); }});
   show('hot');
-})();
+}})();
 </script>
 
 </body></html>
@@ -683,7 +699,7 @@ def main() -> int:
     ts_label = ts_label_from_csv_name(csv_path)
 
     # Existing snapshots for archive + nav context
-    existing_snaps = sorted(SITE_DIR.glob("dashboard_*.html"))
+    existing_snaps = list_existing_snapshots()
     label_to_href = {re.search(r"dashboard_(\d{4}-\d{2}-\d{2}_\d{4})\.html", p.name).group(1): f"/{p.name}"
                      for p in existing_snaps
                      if re.search(r"dashboard_\d{4}-\d{2}-\d{2}_\d{4}\.html", p.name)}
