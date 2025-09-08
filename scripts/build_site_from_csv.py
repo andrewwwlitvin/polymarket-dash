@@ -4,15 +4,17 @@
 """
 Builds static HTML pages from the latest enriched CSV.
 
-Fixes applied (based on live review):
-- Index top utility nav: hide "Home" on index (show only Archive).
-- Index snapshot nav row: show ONLY Back; hide Forward.
-- Tabs: Overlooked is hidden by default; buttons toggle properly.
-- Overlooked selection: prefer near50/underround; ensure it differs from HOT by backfilling with non-HOT rows.
-- Consistent header/footer nav styling with snapshots.
-- Keep only stat boxes on cards (no duplicate one-line summaries).
-- Robust desc_history.json handling (no KeyError even if malformed).
-- All times show “UTC”.
+New in this version:
+- ARCHIVE: snapshot list items are rendered as big .btn buttons (not tiny links).
+- ARCHIVE: the newest snapshot entry points to index.html (live page) instead of its own snapshot file.
+  (We still write the newest snapshot file for history; the archive list just treats it as "live".)
+
+Also retained:
+- Tabs show ONE section at a time; Overlooked distinct from HOT.
+- Navigation consistency (header & footer); index shows Back only; archive shows Forward-only; snapshots show Back+Forward.
+- UTC time everywhere; rotating descriptions for index+archive; frozen for snapshots.
+- robots.txt + sitemap.xml emitted.
+- desc_history.json robust load/save.
 """
 
 import sys, csv, html as html_lib, json, random
@@ -37,7 +39,6 @@ def utc_now() -> datetime:
     return datetime.now(timezone.utc)
 
 def ts_for_snapshot(dt: datetime) -> str:
-    # dashboard_YYYY-MM-DD_HHMM.html
     return dt.strftime("dashboard_%Y-%m-%d_%H%M.html")
 
 def human_date(dt: datetime) -> str:
@@ -61,47 +62,28 @@ def escape(s: str) -> str:
     return html_lib.escape(s, quote=True)
 
 def load_history() -> Dict[str, Any]:
-    """
-    Always return a dict with lists:
-      { "recent_meta": [...], "recent_long": [...] }
-    even if file is empty, malformed, or wrong shape.
-    """
     DATA_DIR.mkdir(parents=True, exist_ok=True)
-    obj: Dict[str, Any]
     if HISTORY_PATH.exists():
         try:
-            txt = HISTORY_PATH.read_text(encoding="utf-8").strip()
-            obj = json.loads(txt) if txt else {}
+            obj = json.loads(HISTORY_PATH.read_text(encoding="utf-8") or "{}")
         except Exception:
             obj = {}
     else:
         obj = {}
-    if not isinstance(obj, dict):
-        obj = {}
-    if not isinstance(obj.get("recent_meta"), list):
-        obj["recent_meta"] = []
-    if not isinstance(obj.get("recent_long"), list):
-        obj["recent_long"] = []
+    if not isinstance(obj, dict): obj = {}
+    obj.setdefault("recent_meta", [])
+    obj.setdefault("recent_long", [])
     return obj
 
 def save_history(hist: Dict[str, Any]) -> None:
-    # Re-validate shape on save
-    if not isinstance(hist, dict):
-        hist = {}
-    if not isinstance(hist.get("recent_meta"), list):
-        hist["recent_meta"] = []
-    if not isinstance(hist.get("recent_long"), list):
-        hist["recent_long"] = []
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     HISTORY_PATH.write_text(json.dumps(hist, ensure_ascii=False, indent=2), encoding="utf-8")
 
 def choose_rotating_file(pool: List[Path], recent: List[str], keep: int = 30) -> Optional[Path]:
     if not pool:
         return None
-    # Prefer those not in recent
     candidates = [p for p in pool if p.name not in recent]
     pick = random.choice(candidates or pool)
-    # update recent (append and cap)
     recent.append(pick.name)
     while len(recent) > keep:
         recent.pop(0)
@@ -115,7 +97,6 @@ def parse_money(n: Optional[str]) -> str:
         return "—"
 
 def caption_text(question: str, url: str) -> str:
-    # Smaller muted caption; link inherits color; not blue
     return (
         f"<p class='embed-caption'>"
         f"{escape(question)} — "
@@ -127,16 +108,10 @@ def ttr_from_iso(end_iso: Optional[str]) -> str:
     if not end_iso:
         return "—"
     try:
-        # allow both Z and +00:00
-        if end_iso.endswith("Z"):
-            dt = datetime.fromisoformat(end_iso.replace("Z", "+00:00"))
-        else:
-            dt = datetime.fromisoformat(end_iso)
+        dt = datetime.fromisoformat(end_iso.replace("Z", "+00:00")) if end_iso.endswith("Z") else datetime.fromisoformat(end_iso)
         sec = (dt - utc_now()).total_seconds()
-        if sec <= 0:
-            return "Ended"
-        days = sec / 86400.0
-        return f"{days:.1f}d"
+        if sec <= 0: return "Ended"
+        return f"{sec/86400.0:.1f}d"
     except Exception:
         return "—"
 
@@ -187,6 +162,12 @@ body { margin:0; font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI,
 .section h2 { margin:0 0 10px 0; font-size: 16px; }
 .meta-block { margin-top: 18px; color:var(--muted); font-size: 14px; }
 
+/* Archive list as buttons */
+.archive-list { display:grid; gap:12px; grid-template-columns: 1fr; }
+@media (min-width: 680px) { .archive-list { grid-template-columns: 1fr 1fr; } }
+@media (min-width: 1024px) { .archive-list { grid-template-columns: 1fr 1fr 1fr; } }
+.archive-item { display:block; }
+
 /* Footer */
 .footer { margin-top: 26px; border-top:1px solid var(--border); padding-top:18px; color:var(--muted); font-size:12px; text-align:center; }
 .footer .navrow { justify-content:center; margin-top: 10px; }
@@ -216,7 +197,6 @@ TABS_JS = """
       secHot.style.display = 'none';
     }
   }
-
   tabHot?.addEventListener('click', ()=>activate('hot'));
   tabGem?.addEventListener('click', ()=>activate('overlooked'));
   // default to HOT visible
@@ -229,34 +209,21 @@ TABS_JS = """
 # HTML builders
 # -----------------------
 def build_nav_top(page_type: str) -> str:
-    """
-    Top row: Home (left) and Archive (right), hidden on their own pages
-    page_type: 'index' | 'archive' | 'snapshot'
-    """
-    home_hidden = " hidden" if page_type == "index" else ""
-    arch_hidden = " hidden" if page_type == "archive" else ""
+    # Home hidden on index; Archive hidden on archive.
     return (
         "<div class='navrow' role='navigation' aria-label='Top utility navigation'>"
-        f"<a class='btn{home_hidden}' href='index.html' aria-label='Home'><span class='ico'>&larr;</span> Home</a>"
-        f"<span style='flex:1 1 auto'></span>"
-        f"<a class='btn{arch_hidden}' href='archive.html' aria-label='Archive'>Archive <span class='ico'>&rarr;</span></a>"
+        f"<a class='btn' href='index.html' aria-label='Home' {'hidden' if page_type=='index' else ''}><span class='ico'>&larr;</span> Home</a>"
+        "<span style='flex:1 1 auto'></span>"
+        f"<a class='btn' href='archive.html' aria-label='Archive' {'hidden' if page_type=='archive' else ''}>Archive <span class='ico'>&rarr;</span></a>"
         "</div>"
     )
 
 def build_nav_back_forward(page_type: str, back_href: Optional[str], fwd_href: Optional[str]) -> str:
-    """
-    Second row: Back / Forward according to rules.
-    If a link is not available, hide its button.
-    On index: should only show Back (if available).
-    """
-    # Index: force no Forward
+    # On index: force no Forward
     if page_type == "index":
         fwd_href = None
-
-    back_hidden = " hidden" if not back_href else ""
-    fwd_hidden  = " hidden" if not fwd_href else ""
-    back_btn = f"<a class='btn{back_hidden}' href='{escape(back_href or '')}' aria-label='Back'>Back <span class='ico'>&rarr;</span></a>"
-    fwd_btn  = f"<a class='btn{fwd_hidden}'  href='{escape(fwd_href or '')}' aria-label='Forward'><span class='ico'>&larr;</span> Forward</a>"
+    back_btn = f"<a class='btn' href='{escape(back_href or '')}' aria-label='Back' {'hidden' if not back_href else ''}>Back <span class='ico'>&rarr;</span></a>"
+    fwd_btn  = f"<a class='btn' href='{escape(fwd_href or '')}' aria-label='Forward' {'hidden' if not fwd_href else ''}><span class='ico'>&larr;</span> Forward</a>"
     return f"<div class='navrow' role='navigation' aria-label='Snapshot navigation'>{fwd_btn}<span style='flex:1 1 auto'></span>{back_btn}</div>"
 
 def build_card(row: Dict[str, Any]) -> str:
@@ -272,6 +239,7 @@ def build_card(row: Dict[str, Any]) -> str:
   <div class="embed-wrap">
     <iframe class="embed" title="{escape(title)}" src="{escape(embed)}" loading="lazy" referrerpolicy="no-referrer-when-downgrade"></iframe>
   </div>
+  <noscript>This market embed requires JavaScript. View it on Polymarket: <a href="{escape(url)}">{escape(url)}</a></noscript>
   {caption_text(title, url)}
   <div class="card-body">
     <h3>{escape(title)}</h3>
@@ -287,13 +255,11 @@ def build_card(row: Dict[str, Any]) -> str:
 def render_grid(rows: List[Dict[str, Any]]) -> str:
     return "<section class='grid'>" + "\n".join(build_card(r) for r in rows) + "</section>"
 
-def page_head(title: str, description: str, canonical: str, og_updated: datetime, build_ts_tag: str, build_nonce: str) -> str:
+def page_head(title: str, description: str, canonical: str, og_updated: datetime) -> str:
     return f"""<!doctype html><html lang='en'><head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
 <title>{escape(title)}</title>
-<!-- build_ts: {escape(build_ts_tag)} -->
-<!-- build_nonce: {escape(build_nonce)} -->
 <meta name="description" content="{escape(description)}" />
 <meta name="keywords" content="polymarket, election odds, prediction markets, betting markets, hidden gems, dashboard" />
 <link rel="canonical" href="{escape(canonical)}" />
@@ -312,18 +278,18 @@ def page_head(title: str, description: str, canonical: str, og_updated: datetime
 """
 
 def page_footer(build_dt: datetime, page_type: str, back_href: Optional[str], fwd_href: Optional[str]) -> str:
-    # Footer nav mirrors header nav rows
-    # On index: hide Home in utility row (only Archive), and no Forward in snapshot row
-    top_util_left = '' if page_type=='index' else '<a class="btn" href="index.html"><span class="ico">&larr;</span> Home</a>'
-    top_util_right = '' if page_type=='archive' else '<a class="btn" href="archive.html">Archive <span class="ico">&rarr;</span></a>'
+    util_left  = "" if page_type=="index"   else '<a class="btn" href="index.html"><span class="ico">&larr;</span> Home</a>'
+    util_right = "" if page_type=="archive" else '<a class="btn" href="archive.html">Archive <span class="ico">&rarr;</span></a>'
+    # Index: Forward hidden
+    if page_type == "index": fwd_href = None
+    back_btn = f'<a class="btn" href="{escape(back_href or "")}" {"hidden" if not back_href else ""}>Back <span class="ico">&rarr;</span></a>'
+    fwd_btn  = f'<a class="btn" href="{escape(fwd_href or "")}" {"hidden" if not fwd_href else ""}><span class="ico">&larr;</span> Forward</a>'
     return f"""
 <div class="footer">
   <div class="navrow" role="navigation" aria-label="Footer utility nav">
-    {top_util_left}
-    <span style="flex:1 1 auto"></span>
-    {top_util_right}
+    {util_left}<span style="flex:1 1 auto"></span>{util_right}
   </div>
-  {build_nav_back_forward(page_type, back_href, (None if page_type=='index' else fwd_href))}
+  <div class="navrow" role="navigation" aria-label="Footer snapshot nav">{fwd_btn}<span style="flex:1 1 auto"></span>{back_btn}</div>
   <div class="sys">Last updated: {escape(human_date(build_dt))}</div>
   <div class="sys">Not financial advice. DYOR.</div>
 </div>
@@ -357,32 +323,26 @@ def main() -> int:
     SITE_DIR.mkdir(parents=True, exist_ok=True)
     DATA_DIR.mkdir(parents=True, exist_ok=True)
 
-    # Pick CSV
-    if len(sys.argv) > 1:
-        csv_path = Path(sys.argv[1])
-    else:
-        csv_path = newest_csv_in_data()
-        if not csv_path:
-            print("ERROR: No CSV found in data/, and none provided")
-            return 1
-
-    print(f"[builder] CLI CSV arg detected: {csv_path}" if len(sys.argv)>1 else f"[builder] Auto-picked latest CSV: {csv_path}")
+    # CSV
+    csv_path = Path(sys.argv[1]) if len(sys.argv) > 1 else newest_csv_in_data()
+    if not csv_path or not csv_path.exists():
+        print("ERROR: No CSV found or provided.")
+        return 1
     rows = read_csv_rows(csv_path)
     if not rows:
         print("ERROR: CSV has no rows")
         return 1
 
-    # HOT = first 12 rows (already ranked upstream)
-    top = rows[:12]
+    # HOT = first 12 rows
+    hot = rows[:12]
 
-    # OVERLOOKED = prefer near50/underround; then ensure distinct from HOT
-    hot_ids = set()
-    for r in top:
-        # Try common identifiers
-        rid = r.get("id") or r.get("slug") or r.get("url") or r.get("question")
-        if rid: hot_ids.add(str(rid))
+    # OVERLOOKED = distinct from HOT
+    def rid(r: Dict[str, Any]) -> str:
+        return str(r.get("id") or r.get("slug") or r.get("url") or r.get("question") or id(r))
+    hot_ids = {rid(r) for r in hot}
 
-    pool: List[Dict[str, Any]] = []
+    # Seed pool (near50Flag==1 OR underround<0), exclude HOT
+    seed = []
     for r in rows:
         try:
             near50 = float(r.get("near50Flag") or 0)
@@ -392,72 +352,46 @@ def main() -> int:
             under = float(r.get("underround") or 0)
         except Exception:
             under = 0
-        if near50 >= 1 or under < 0:
-            pool.append(r)
+        if (near50 >= 1 or under < 0) and rid(r) not in hot_ids:
+            seed.append(r)
 
-    gems: List[Dict[str, Any]] = []
-    # Take non-HOT from pool first
-    for r in pool:
-        rid = r.get("id") or r.get("slug") or r.get("url") or r.get("question")
-        if rid and str(rid) not in hot_ids:
-            gems.append(r)
-        if len(gems) >= 12:
-            break
-    # Backfill with non-HOT rows if needed
+    gems = seed[:]
+    # Backfill ONLY from non-HOT rows until 12
     if len(gems) < 12:
         for r in rows:
-            rid = r.get("id") or r.get("slug") or r.get("url") or r.get("question")
-            if rid and str(rid) not in hot_ids:
-                if r not in gems:
-                    gems.append(r)
-            if len(gems) >= 12:
-                break
+            if rid(r) not in hot_ids and r not in gems:
+                gems.append(r)
+                if len(gems) >= 12:
+                    break
+    gems = gems[:12]
 
-    # ROTATING descriptions (index & archive); snapshots freeze
+    # descriptions (rotate on index/archive; snapshots freeze)
     hist = load_history()
-    recent_meta = hist.get("recent_meta", [])
-    recent_long = hist.get("recent_long", [])
-    if not isinstance(recent_meta, list): recent_meta = []
-    if not isinstance(recent_long, list): recent_long = []
-
     meta_files = sorted(META_DIR.glob("*.txt"))
     long_files = sorted(LONG_DIR.glob("*.html"))
+    meta_pick = choose_rotating_file(meta_files, hist["recent_meta"])
+    long_pick = choose_rotating_file(long_files, hist["recent_long"])
+    short_desc = (meta_pick.read_text(encoding="utf-8").strip() if meta_pick else "Daily dashboard of Polymarket heat & overlooked opportunities.")
+    long_desc_html = (long_pick.read_text(encoding="utf-8") if long_pick else "<p>Insightful commentary rotates here.</p>")
+    save_history(hist)
 
-    meta_pick = choose_rotating_file(meta_files, recent_meta)
-    long_pick = choose_rotating_file(long_files, recent_long)
-
-    # write back updated recents into hist
-    hist["recent_meta"] = recent_meta
-    hist["recent_long"] = recent_long
-
-    short_desc = (meta_pick.read_text(encoding="utf-8").strip() if meta_pick and meta_pick.exists() else "Daily dashboard of Polymarket heat & overlooked opportunities.")
-    long_desc_html = (long_pick.read_text(encoding="utf-8") if long_pick and long_pick.exists() else "<p>Insightful commentary rotates here.</p>")
-
-    print(f"[builder] Using meta={meta_pick.name if meta_pick else '—'}, long={long_pick.name if long_pick else '—'}")
-
-    # Times / titles
     now = utc_now()
     human = human_date(now)
-    build_ts_tag = now.strftime("%Y-%m-%d_%H%M%S")
-    nonce = str(random.getrandbits(31))
 
-    # ---------- Build INDEX (with Today) ----------
-    index_title = f"Hottest Markets & Overlooked Chances on Polymarket Today — {human}"
+    # ---------- INDEX ----------
     head = page_head(
-        title=index_title,
+        title=f"Hottest Markets & Overlooked Chances on Polymarket Today — {human}",
         description=short_desc[:160],
         canonical="https://urbanpoly.com/index.html",
         og_updated=now,
-        build_ts_tag=build_ts_tag,
-        build_nonce=nonce,
     )
-    # top utility nav: hide Home on index
+    # top row (Home hidden on index)
     top_nav = build_nav_top("index")
-    # back link on index: previous snapshot by filename order (if exists)
-    snapshots_existing = sorted(SITE_DIR.glob("dashboard_*.html"))
-    back_href_index = snapshots_existing[-1].name if snapshots_existing else None
-    # index must NOT show forward
-    nav_row_index = build_nav_back_forward("index", back_href_index, None)
+    # Back points to latest snapshot if any
+    snaps = sorted(SITE_DIR.glob("dashboard_*.html"))
+    back_href_index = snaps[-1].name if snaps else None
+    # No Forward on index
+    row_nav = build_nav_back_forward("index", back_href_index, None)
 
     tabs = """
 <div class="tabs">
@@ -475,14 +409,10 @@ def main() -> int:
         "<div class='source'>Source: Polymarket API data.</div>",
         "</header>",
         top_nav,
-        nav_row_index,
+        row_nav,
         tabs,
-        "<section id='sec-hot'>",
-        render_grid(top),
-        "</section>",
-        "<section id='sec-overlooked' style='display:none'>",
-        render_grid(gems),
-        "</section>",
+        "<section id='sec-hot'>", render_grid(hot), "</section>",
+        "<section id='sec-overlooked' style='display:none'>", render_grid(gems), "</section>",
         description_html(short_desc, long_desc_html),
         methodology_html(),
         "</div>",
@@ -491,27 +421,27 @@ def main() -> int:
     ]
     (SITE_DIR / "index.html").write_text("\n".join(html_index), encoding="utf-8")
 
-    # ---------- Build SNAPSHOT (drop Today) ----------
+    # ---------- SNAPSHOT ----------
     snap_name = ts_for_snapshot(now)
-    snap_title = f"Hottest Markets & Overlooked Chances on Polymarket — {human}"
     head_snap = page_head(
-        title=snap_title,
-        description=short_desc[:160],  # freeze description at publish time
+        title=f"Hottest Markets & Overlooked Chances on Polymarket — {human}",
+        description=short_desc[:160],  # frozen copy
         canonical=f"https://urbanpoly.com/{snap_name}",
         og_updated=now,
-        build_ts_tag=build_ts_tag,
-        build_nonce=nonce,
     )
-    # snapshot nav: Home+Archive top; back+forward second row
-    # compute neighbors from existing snapshots + this one
-    older_snaps = sorted(SITE_DIR.glob("dashboard_*.html"))
-    older_names = [p.name for p in older_snaps]
-    # back href: last older (or archive)
-    snap_back = older_names[-1] if older_names else "archive.html"
-    # forward href: index
-    snap_fwd = "index.html"
+    # Snapshot top utility nav (both visible)
     top_nav_snap = build_nav_top("snapshot")
-    nav_row_snap = build_nav_back_forward("snapshot", snap_back, snap_fwd)
+    # Snapshot Back = previous snapshot or archive; Forward = index
+    prev_snaps = sorted(SITE_DIR.glob("dashboard_*.html"))
+    back_href_snap = (prev_snaps[-1].name if prev_snaps else "archive.html")
+    fwd_href_snap = "index.html"
+
+    tabs_snap = """
+<div class="tabs">
+  <button id="tab-hot" class="active">HOT</button>
+  <button id="tab-overlooked">Overlooked</button>
+</div>
+"""
 
     html_snap = [
         head_snap,
@@ -522,48 +452,51 @@ def main() -> int:
         "<div class='source'>Source: Polymarket API data.</div>",
         "</header>",
         top_nav_snap,
-        nav_row_snap,
-        """
-<div class="tabs">
-  <button id="tab-hot" class="active">HOT</button>
-  <button id="tab-overlooked">Overlooked</button>
-</div>
-""",
-        "<section id='sec-hot'>",
-        render_grid(top),
-        "</section>",
-        "<section id='sec-overlooked' style='display:none'>",
-        render_grid(gems),
-        "</section>",
-        # Snapshot keeps the description frozen at publish time
+        build_nav_back_forward("snapshot", back_href_snap, fwd_href_snap),
+        tabs_snap,
+        "<section id='sec-hot'>", render_grid(hot), "</section>",
+        "<section id='sec-overlooked' style='display:none'>", render_grid(gems), "</section>",
+        # snapshot freezes the picked descriptions
         description_html(short_desc, long_desc_html),
         methodology_html(),
         "</div>",
         TABS_JS,
-        page_footer(now, "snapshot", snap_back, snap_fwd),
+        page_footer(now, "snapshot", back_href_snap, fwd_href_snap),
     ]
     (SITE_DIR / snap_name).write_text("\n".join(html_snap), encoding="utf-8")
 
-    # ---------- Build ARCHIVE (rotating description like index) ----------
-    snaps_after_write = sorted(SITE_DIR.glob("dashboard_*.html"))
-    oldest = snaps_after_write[0].name if snaps_after_write else None
+    # ---------- ARCHIVE ----------
     head_arch = page_head(
         title="Polymarket Dashboards — Archive",
-        description=short_desc[:160],  # rotates every run
+        description=short_desc[:160],  # rotates
         canonical="https://urbanpoly.com/archive.html",
         og_updated=now,
-        build_ts_tag=build_ts_tag,
-        build_nonce=nonce,
     )
-    top_nav_arch = build_nav_top("archive")
-    nav_row_arch = build_nav_back_forward("archive", None, oldest)
+    snaps_after = sorted(SITE_DIR.glob("dashboard_*.html"), key=lambda p: p.stat().st_mtime, reverse=True)
+    newest_snap = snaps_after[0].name if snaps_after else None
+    oldest_snap = snaps_after[-1].name if snaps_after else None
 
-    # Simple list of snapshots newest->oldest
-    items = []
-    for p in sorted(snaps_after_write, key=lambda x: x.stat().st_mtime, reverse=True):
-        label = p.name.replace("dashboard_", "").replace(".html", "")
-        items.append(f"<li><a href='{p.name}'>{escape(label)}</a></li>")
-    list_html = "<ul>" + "\n".join(items) + "</ul>" if items else "<p>No snapshots yet.</p>"
+    # Buttons list: newest → index.html, others → their own files
+    if snaps_after:
+        items_btns: List[str] = []
+        for i, p in enumerate(snaps_after):
+            label = p.name.replace("dashboard_", "").replace(".html", "")
+            if i == 0:
+                # newest maps to index.html
+                items_btns.append(
+                    f"<a class='btn archive-item' href='index.html' aria-label='Open latest snapshot (live)'>"
+                    f"<span class='ico'>&#128336;</span> {escape(label)} (live)"
+                    f"</a>"
+                )
+            else:
+                items_btns.append(
+                    f"<a class='btn archive-item' href='{p.name}' aria-label='Open snapshot {escape(label)}'>"
+                    f"{escape(label)}"
+                    f"</a>"
+                )
+        list_html = "<div class='archive-list'>" + "\n".join(items_btns) + "</div>"
+    else:
+        list_html = "<p>No snapshots yet.</p>"
 
     html_arch = [
         head_arch,
@@ -573,8 +506,9 @@ def main() -> int:
         f"<div class='date'>{escape(human)}</div>",
         "<div class='source'>All published snapshots, newest first.</div>",
         "</header>",
-        top_nav_arch,
-        nav_row_arch,
+        build_nav_top("archive"),
+        # Archive nav: only Forward (to oldest)
+        build_nav_back_forward("archive", None, oldest_snap),
         "<div class='section'><h2>All Snapshots</h2>",
         list_html,
         "</div>",
@@ -582,37 +516,20 @@ def main() -> int:
         description_html(short_desc, long_desc_html),
         methodology_html(),
         "</div>",
-        page_footer(now, "archive", None, oldest),
+        page_footer(now, "archive", None, oldest_snap),
     ]
     (SITE_DIR / "archive.html").write_text("\n".join(html_arch), encoding="utf-8")
 
-    # ---------- robots.txt & sitemap.xml ----------
-    robots = "User-agent: *\nAllow: /\nSitemap: https://urbanpoly.com/sitemap.xml\n"
-    (SITE_DIR / "robots.txt").write_text(robots, encoding="utf-8")
-
-    # Build a sitemap of index + archive + all snapshots
-    snap_names = [p.name for p in snaps_after_write]
-    urls = ["index.html", "archive.html"] + snap_names
-    lastmod = iso_og_time(now)
-    sm = [
-        '<?xml version="1.0" encoding="UTF-8"?>',
-        '<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">'
-    ]
+    # ---------- robots + sitemap ----------
+    (SITE_DIR / "robots.txt").write_text("User-agent: *\nAllow: /\nSitemap: https://urbanpoly.com/sitemap.xml\n", encoding="utf-8")
+    urls = ["index.html", "archive.html"] + [p.name for p in snaps_after]
+    sm = ['<?xml version="1.0" encoding="UTF-8"?>','<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">']
     for u in urls:
-        loc = f"https://urbanpoly.com/{u}"
-        sm += [
-            "<url>",
-            f"<loc>{loc}</loc>",
-            f"<lastmod>{lastmod}</lastmod>",
-            "</url>"
-        ]
+        sm += [ "<url>", f"<loc>https://urbanpoly.com/{u}</loc>", f"<lastmod>{iso_og_time(now)}</lastmod>", "</url>" ]
     sm.append("</urlset>")
     (SITE_DIR / "sitemap.xml").write_text("\n".join(sm), encoding="utf-8")
 
-    # Save desc history (for rotation) — robust file
-    save_history(hist)
-
-    print("[ok] Wrote site/index.html, site/archive.html, site/sitemap.xml, site/robots.txt; updated snapshot navs")
+    print("[ok] Wrote index, snapshot, archive; archive buttons + newest->index mapping applied.")
     return 0
 
 if __name__ == "__main__":
