@@ -4,34 +4,21 @@
 """
 Builds static HTML pages from the latest enriched CSV.
 
-Implements UX/SEO fixes (Steps 1–10):
-- Consistent header/footer nav, per-page rules (index/archive/snapshot)
-- Tabs label = "Overlooked" and switching works
-- Remove duplicate plain "why" line; keep stat boxes only
-- Muted, small embed captions; link not blue
-- Remove "HOT (Top 12) / Overlooked (Top 12)" headings on index
-- Archive gains rotating description (like index). Snapshots freeze description at publish time
-- All times show "UTC"; og:updated_time in ISO UTC
-- Snapshot titles drop "Today"; index keeps it
-
-Inputs:
-- CSV path as argv[1], or auto-pick newest in data/
-- content/meta/*.txt (short description pool)
-- content/long/*.html (long description pool)
-- data/desc_history.json (to avoid repeats)
-
-Outputs:
-- site/index.html
-- site/dashboard_YYYY-MM-DD_HHMM.html (snapshot)
-- site/archive.html
-- site/robots.txt
-- site/sitemap.xml
-- data/desc_history.json (updated)
+Fixes applied (based on live review):
+- Index top utility nav: hide "Home" on index (show only Archive).
+- Index snapshot nav row: show ONLY Back; hide Forward.
+- Tabs: Overlooked is hidden by default; buttons toggle properly.
+- Overlooked selection: prefer near50/underround; ensure it differs from HOT by backfilling with non-HOT rows.
+- Consistent header/footer nav styling with snapshots.
+- Keep only stat boxes on cards (no duplicate one-line summaries).
+- Robust desc_history.json handling (no KeyError even if malformed).
+- All times show “UTC”.
 """
 
-import sys, csv, re, html as html_lib, json, random
+import sys, csv, html as html_lib, json, random
 from pathlib import Path
 from datetime import datetime, timezone
+from typing import List, Dict, Any, Optional
 
 ROOT = Path(__file__).resolve().parents[1]
 DATA_DIR = ROOT / "data"
@@ -46,7 +33,7 @@ HISTORY_PATH = DATA_DIR / "desc_history.json"
 # -----------------------
 # Helpers
 # -----------------------
-def utc_now():
+def utc_now() -> datetime:
     return datetime.now(timezone.utc)
 
 def ts_for_snapshot(dt: datetime) -> str:
@@ -59,13 +46,13 @@ def human_date(dt: datetime) -> str:
 def iso_og_time(dt: datetime) -> str:
     return dt.strftime("%Y-%m-%dT%H:%M:%SZ")
 
-def newest_csv_in_data() -> Path | None:
+def newest_csv_in_data() -> Optional[Path]:
     csvs = list(DATA_DIR.glob("polymarket_enriched_fast_*.csv"))
     if not csvs:
         return None
     return sorted(csvs, key=lambda p: p.stat().st_mtime, reverse=True)[0]
 
-def read_csv_rows(csv_path: Path) -> list[dict]:
+def read_csv_rows(csv_path: Path) -> List[Dict[str, Any]]:
     with csv_path.open("r", encoding="utf-8") as f:
         r = csv.DictReader(f)
         return [dict(row) for row in r]
@@ -73,33 +60,42 @@ def read_csv_rows(csv_path: Path) -> list[dict]:
 def escape(s: str) -> str:
     return html_lib.escape(s, quote=True)
 
-def load_history() -> dict:
+def load_history() -> Dict[str, Any]:
     """
     Always return a dict with lists:
       { "recent_meta": [...], "recent_long": [...] }
-    even if file is missing, empty, malformed, or wrong shape.
+    even if file is empty, malformed, or wrong shape.
     """
     DATA_DIR.mkdir(parents=True, exist_ok=True)
+    obj: Dict[str, Any]
     if HISTORY_PATH.exists():
         try:
-            obj = json.loads(HISTORY_PATH.read_text(encoding="utf-8"))
+            txt = HISTORY_PATH.read_text(encoding="utf-8").strip()
+            obj = json.loads(txt) if txt else {}
         except Exception:
             obj = {}
     else:
         obj = {}
     if not isinstance(obj, dict):
         obj = {}
-    if "recent_meta" not in obj or not isinstance(obj.get("recent_meta"), list):
+    if not isinstance(obj.get("recent_meta"), list):
         obj["recent_meta"] = []
-    if "recent_long" not in obj or not isinstance(obj.get("recent_long"), list):
+    if not isinstance(obj.get("recent_long"), list):
         obj["recent_long"] = []
     return obj
 
-def save_history(hist: dict):
+def save_history(hist: Dict[str, Any]) -> None:
+    # Re-validate shape on save
+    if not isinstance(hist, dict):
+        hist = {}
+    if not isinstance(hist.get("recent_meta"), list):
+        hist["recent_meta"] = []
+    if not isinstance(hist.get("recent_long"), list):
+        hist["recent_long"] = []
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     HISTORY_PATH.write_text(json.dumps(hist, ensure_ascii=False, indent=2), encoding="utf-8")
 
-def choose_rotating_file(pool: list[Path], recent: list[str], keep: int = 30) -> Path | None:
+def choose_rotating_file(pool: List[Path], recent: List[str], keep: int = 30) -> Optional[Path]:
     if not pool:
         return None
     # Prefer those not in recent
@@ -111,7 +107,7 @@ def choose_rotating_file(pool: list[Path], recent: list[str], keep: int = 30) ->
         recent.pop(0)
     return pick
 
-def parse_money(n: str | None) -> str:
+def parse_money(n: Optional[str]) -> str:
     try:
         x = float(n) if n not in (None, "") else 0.0
         return f"${int(round(x)):,}"
@@ -127,13 +123,18 @@ def caption_text(question: str, url: str) -> str:
         f"</p>"
     )
 
-def ttr_from_iso(end_iso: str | None) -> str:
+def ttr_from_iso(end_iso: Optional[str]) -> str:
     if not end_iso:
         return "—"
     try:
-        dt = datetime.fromisoformat(end_iso.replace("Z", "+00:00"))
+        # allow both Z and +00:00
+        if end_iso.endswith("Z"):
+            dt = datetime.fromisoformat(end_iso.replace("Z", "+00:00"))
+        else:
+            dt = datetime.fromisoformat(end_iso)
         sec = (dt - utc_now()).total_seconds()
-        if sec <= 0: return "Ended"
+        if sec <= 0:
+            return "Ended"
         days = sec / 86400.0
         return f"{days:.1f}d"
     except Exception:
@@ -242,18 +243,23 @@ def build_nav_top(page_type: str) -> str:
         "</div>"
     )
 
-def build_nav_back_forward(page_type: str, back_href: str | None, fwd_href: str | None) -> str:
+def build_nav_back_forward(page_type: str, back_href: Optional[str], fwd_href: Optional[str]) -> str:
     """
     Second row: Back / Forward according to rules.
     If a link is not available, hide its button.
+    On index: should only show Back (if available).
     """
+    # Index: force no Forward
+    if page_type == "index":
+        fwd_href = None
+
     back_hidden = " hidden" if not back_href else ""
     fwd_hidden  = " hidden" if not fwd_href else ""
     back_btn = f"<a class='btn{back_hidden}' href='{escape(back_href or '')}' aria-label='Back'>Back <span class='ico'>&rarr;</span></a>"
     fwd_btn  = f"<a class='btn{fwd_hidden}'  href='{escape(fwd_href or '')}' aria-label='Forward'><span class='ico'>&larr;</span> Forward</a>"
     return f"<div class='navrow' role='navigation' aria-label='Snapshot navigation'>{fwd_btn}<span style='flex:1 1 auto'></span>{back_btn}</div>"
 
-def build_card(row: dict) -> str:
+def build_card(row: Dict[str, Any]) -> str:
     title = row.get("question") or "(Untitled)"
     url = row.get("url") or ""
     embed = row.get("embedSrc") or ""
@@ -278,7 +284,7 @@ def build_card(row: dict) -> str:
   </div>
 </article>""".strip()
 
-def render_grid(rows: list[dict]) -> str:
+def render_grid(rows: List[Dict[str, Any]]) -> str:
     return "<section class='grid'>" + "\n".join(build_card(r) for r in rows) + "</section>"
 
 def page_head(title: str, description: str, canonical: str, og_updated: datetime, build_ts_tag: str, build_nonce: str) -> str:
@@ -305,16 +311,19 @@ def page_head(title: str, description: str, canonical: str, og_updated: datetime
 </head><body>
 """
 
-def page_footer(build_dt: datetime, page_type: str, back_href: str | None, fwd_href: str | None) -> str:
+def page_footer(build_dt: datetime, page_type: str, back_href: Optional[str], fwd_href: Optional[str]) -> str:
     # Footer nav mirrors header nav rows
+    # On index: hide Home in utility row (only Archive), and no Forward in snapshot row
+    top_util_left = '' if page_type=='index' else '<a class="btn" href="index.html"><span class="ico">&larr;</span> Home</a>'
+    top_util_right = '' if page_type=='archive' else '<a class="btn" href="archive.html">Archive <span class="ico">&rarr;</span></a>'
     return f"""
 <div class="footer">
   <div class="navrow" role="navigation" aria-label="Footer utility nav">
-    {'<a class="btn" href="index.html"><span class="ico">&larr;</span> Home</a>' if page_type!='index' else ''}
+    {top_util_left}
     <span style="flex:1 1 auto"></span>
-    {'<a class="btn" href="archive.html">Archive <span class="ico">&rarr;</span></a>' if page_type!='archive' else ''}
+    {top_util_right}
   </div>
-  {build_nav_back_forward(page_type, back_href, fwd_href)}
+  {build_nav_back_forward(page_type, back_href, (None if page_type=='index' else fwd_href))}
   <div class="sys">Last updated: {escape(human_date(build_dt))}</div>
   <div class="sys">Not financial advice. DYOR.</div>
 </div>
@@ -344,7 +353,7 @@ def methodology_html() -> str:
 # -----------------------
 # Main build
 # -----------------------
-def main():
+def main() -> int:
     SITE_DIR.mkdir(parents=True, exist_ok=True)
     DATA_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -355,18 +364,25 @@ def main():
         csv_path = newest_csv_in_data()
         if not csv_path:
             print("ERROR: No CSV found in data/, and none provided")
-            sys.exit(1)
+            return 1
 
     print(f"[builder] CLI CSV arg detected: {csv_path}" if len(sys.argv)>1 else f"[builder] Auto-picked latest CSV: {csv_path}")
     rows = read_csv_rows(csv_path)
     if not rows:
         print("ERROR: CSV has no rows")
-        sys.exit(1)
+        return 1
 
-    # Slice top 12 lists by the CSV order (assume already ranked), or fallback safe slice
+    # HOT = first 12 rows (already ranked upstream)
     top = rows[:12]
-    # derive a "gems" set by filtering where near50Flag==1 or underround<0 then take first 12
-    gems_pool = []
+
+    # OVERLOOKED = prefer near50/underround; then ensure distinct from HOT
+    hot_ids = set()
+    for r in top:
+        # Try common identifiers
+        rid = r.get("id") or r.get("slug") or r.get("url") or r.get("question")
+        if rid: hot_ids.add(str(rid))
+
+    pool: List[Dict[str, Any]] = []
     for r in rows:
         try:
             near50 = float(r.get("near50Flag") or 0)
@@ -377,16 +393,43 @@ def main():
         except Exception:
             under = 0
         if near50 >= 1 or under < 0:
-            gems_pool.append(r)
-    gems = (gems_pool[:12]) if gems_pool else rows[12:24]
+            pool.append(r)
+
+    gems: List[Dict[str, Any]] = []
+    # Take non-HOT from pool first
+    for r in pool:
+        rid = r.get("id") or r.get("slug") or r.get("url") or r.get("question")
+        if rid and str(rid) not in hot_ids:
+            gems.append(r)
+        if len(gems) >= 12:
+            break
+    # Backfill with non-HOT rows if needed
+    if len(gems) < 12:
+        for r in rows:
+            rid = r.get("id") or r.get("slug") or r.get("url") or r.get("question")
+            if rid and str(rid) not in hot_ids:
+                if r not in gems:
+                    gems.append(r)
+            if len(gems) >= 12:
+                break
 
     # ROTATING descriptions (index & archive); snapshots freeze
     hist = load_history()
+    recent_meta = hist.get("recent_meta", [])
+    recent_long = hist.get("recent_long", [])
+    if not isinstance(recent_meta, list): recent_meta = []
+    if not isinstance(recent_long, list): recent_long = []
+
     meta_files = sorted(META_DIR.glob("*.txt"))
     long_files = sorted(LONG_DIR.glob("*.html"))
 
-    meta_pick = choose_rotating_file(meta_files, hist["recent_meta"])
-    long_pick = choose_rotating_file(long_files, hist["recent_long"])
+    meta_pick = choose_rotating_file(meta_files, recent_meta)
+    long_pick = choose_rotating_file(long_files, recent_long)
+
+    # write back updated recents into hist
+    hist["recent_meta"] = recent_meta
+    hist["recent_long"] = recent_long
+
     short_desc = (meta_pick.read_text(encoding="utf-8").strip() if meta_pick and meta_pick.exists() else "Daily dashboard of Polymarket heat & overlooked opportunities.")
     long_desc_html = (long_pick.read_text(encoding="utf-8") if long_pick and long_pick.exists() else "<p>Insightful commentary rotates here.</p>")
 
@@ -408,14 +451,15 @@ def main():
         build_ts_tag=build_ts_tag,
         build_nonce=nonce,
     )
-    # top nav (Archive only on index)
+    # top utility nav: hide Home on index
     top_nav = build_nav_top("index")
     # back link on index: previous snapshot by filename order (if exists)
-    snapshots = sorted(SITE_DIR.glob("dashboard_*.html"))
-    back_href_index = snapshots[-1].name if snapshots else None
-    nav_row = build_nav_back_forward("index", back_href_index, None)
+    snapshots_existing = sorted(SITE_DIR.glob("dashboard_*.html"))
+    back_href_index = snapshots_existing[-1].name if snapshots_existing else None
+    # index must NOT show forward
+    nav_row_index = build_nav_back_forward("index", back_href_index, None)
 
-    tabs = f"""
+    tabs = """
 <div class="tabs">
   <button id="tab-hot" class="active">HOT</button>
   <button id="tab-overlooked">Overlooked</button>
@@ -424,16 +468,15 @@ def main():
 
     html_index = [
         head,
-        f"<div class='container'>",
+        "<div class='container'>",
         "<header class='header'>",
-        f"<h1>Hottest Markets &amp; Overlooked Chances on Polymarket Today</h1>",
+        "<h1>Hottest Markets &amp; Overlooked Chances on Polymarket Today</h1>",
         f"<div class='date'>{escape(human)}</div>",
         "<div class='source'>Source: Polymarket API data.</div>",
         "</header>",
         top_nav,
-        nav_row,
+        nav_row_index,
         tabs,
-        # No extra headings "HOT (Top 12)" etc. — removed per STEP 5
         "<section id='sec-hot'>",
         render_grid(top),
         "</section>",
@@ -461,12 +504,11 @@ def main():
     )
     # snapshot nav: Home+Archive top; back+forward second row
     # compute neighbors from existing snapshots + this one
-    snapshots = sorted(SITE_DIR.glob("dashboard_*.html"))
-    older = snapshots  # existing ones already on disk
-    older_names = [p.name for p in older]
+    older_snaps = sorted(SITE_DIR.glob("dashboard_*.html"))
+    older_names = [p.name for p in older_snaps]
     # back href: last older (or archive)
     snap_back = older_names[-1] if older_names else "archive.html"
-    # forward href: none yet (to be index)
+    # forward href: index
     snap_fwd = "index.html"
     top_nav_snap = build_nav_top("snapshot")
     nav_row_snap = build_nav_back_forward("snapshot", snap_back, snap_fwd)
@@ -475,7 +517,7 @@ def main():
         head_snap,
         "<div class='container'>",
         "<header class='header'>",
-        f"<h1>Hottest Markets &amp; Overlooked Chances on Polymarket</h1>",
+        "<h1>Hottest Markets &amp; Overlooked Chances on Polymarket</h1>",
         f"<div class='date'>{escape(human)}</div>",
         "<div class='source'>Source: Polymarket API data.</div>",
         "</header>",
@@ -536,7 +578,7 @@ def main():
         "<div class='section'><h2>All Snapshots</h2>",
         list_html,
         "</div>",
-        # Archive gets rotating description every run (STEP 7)
+        # Archive gets rotating description every run
         description_html(short_desc, long_desc_html),
         methodology_html(),
         "</div>",
@@ -551,13 +593,13 @@ def main():
     # Build a sitemap of index + archive + all snapshots
     snap_names = [p.name for p in snaps_after_write]
     urls = ["index.html", "archive.html"] + snap_names
-    locs = [f"https://urbanpoly.com/{u}" for u in urls]
     lastmod = iso_og_time(now)
     sm = [
         '<?xml version="1.0" encoding="UTF-8"?>',
         '<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">'
     ]
-    for loc in locs:
+    for u in urls:
+        loc = f"https://urbanpoly.com/{u}"
         sm += [
             "<url>",
             f"<loc>{loc}</loc>",
@@ -571,6 +613,7 @@ def main():
     save_history(hist)
 
     print("[ok] Wrote site/index.html, site/archive.html, site/sitemap.xml, site/robots.txt; updated snapshot navs")
+    return 0
 
 if __name__ == "__main__":
     sys.exit(main())
