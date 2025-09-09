@@ -1,133 +1,42 @@
-<!doctype html><html lang='en'>
-<head>
-<meta charset="utf-8" />
+<!doctype html><html lang='en'><head><meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
 <title>Polymarket Dashboards — Archive</title>
-<!-- build_ts: 2025-09-08_231331 -->
-<meta name="description" content="Browse all UrbanPoly snapshots (hottest &amp; overlooked Polymarket markets) updated every 6 hours." />
-<meta name="keywords" content="polymarket, election odds, prediction markets, betting markets, hidden gems, dashboard" />
-<link rel="canonical" href="https://urbanpoly.com/archive.html" />
 <meta property="og:title" content="Polymarket Dashboards — Archive" />
-<meta property="og:description" content="Browse all UrbanPoly snapshots (hottest &amp; overlooked Polymarket markets) updated every 6 hours." />
+<meta property="og:description" content="Chronological archive of snapshots generated every ~6 hours." />
 <meta property="og:type" content="website" />
 <meta property="og:url" content="https://urbanpoly.com/archive.html" />
-<meta property="og:image" content="https://urbanpoly.com/og-preview.png" />
+<meta property="og:image" content="/og-preview.png" />
 <meta name="twitter:card" content="summary_large_image" />
 <meta name="twitter:title" content="Polymarket Dashboards — Archive" />
-<meta name="twitter:description" content="Browse all UrbanPoly snapshots (hottest &amp; overlooked Polymarket markets) updated every 6 hours." />
-<meta name="twitter:image" content="https://urbanpoly.com/og-preview.png" />
-<link rel="icon" type="image/png" sizes="16x16" href="/favicon-16x16.png">
-<link rel="icon" type="image/png" sizes="32x32" href="/favicon-32x32.png">
-<link rel="apple-touch-icon" sizes="180x180" href="/favicon-180x180.png">
-<link rel="icon" type="image/png" sizes="512x512" href="/favicon-512x512.png">
-<link rel="shortcut icon" href="/favicon.ico">
-<script type="application/ld+json">
-[
-  {
-    "@context": "https://schema.org",
-    "@type": "WebSite",
-    "name": "UrbanPoly",
-    "url": "https://urbanpoly.com/",
-    "potentialAction": {
-      "@type": "SearchAction",
-      "target": "https://urbanpoly.com/archive.html?q={search_term_string}",
-      "query-input": "required name=search_term_string"
-    }
-  },
-  {
-    "@context": "https://schema.org",
-    "@type": "CollectionPage",
-    "name": "Polymarket Dashboards — Archive",
-    "url": "https://urbanpoly.com/archive.html",
-    "inLanguage": "en",
-    "isPartOf": {
-      "@type": "WebSite",
-      "name": "UrbanPoly",
-      "url": "https://urbanpoly.com/"
-    },
-    "description": "Browse all UrbanPoly snapshots (hottest & overlooked Polymarket markets) updated every 6 hours."
-  }
-]
-</script>
+<meta name="twitter:description" content="Chronological archive of snapshots generated every ~6 hours." />
+<meta name="twitter:image" content="/og-preview.png" />
+<link rel="canonical" href="https://urbanpoly.com/archive.html" />
+<link rel="icon" href="/favicon.ico" />
 <style>:root { --bg:#0b0b10; --fg:#eaeaf0; --muted:#a3a8b4; --card:#141420; --border:#232336; --accent:#6ea8fe; --accent-2:#a879fe; }
-* { box-sizing: border-box; }
-body { margin:0; font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, sans-serif; background: var(--bg); color: var(--fg); }
-.container { max-width: 1240px; margin: 0 auto; padding: 32px 24px 44px; }
-.header { margin-bottom: 18px; }
-.header h1 { margin:0; font-size: 34px; font-variant: small-caps; letter-spacing: .5px; }
-.header .date { color: var(--fg); font-size: 20px; font-weight: 600; margin-top: 6px; }
-.header .source { color: var(--muted); font-size: 14px; margin-top: 6px; }
-.navrow { display:flex; align-items:center; gap:12px; margin: 8px 0 18px; flex-wrap: wrap; }
-.btn { display:inline-flex; align-items:center; gap:8px; padding:10px 14px; border:1px solid var(--border); border-radius: 14px; background:transparent; color:var(--fg); text-decoration:none; font-weight:700; }
-.btn:hover { background:#151526; }
-.spacer { flex:1; }
-.tabs { display:grid; grid-template-columns: 1fr 1fr; border:1px solid var(--border); border-radius: 14px; overflow:hidden; }
-.tabs a { text-align:center; text-decoration:none; padding:12px; font-weight:700; color:var(--fg); }
-.tabs a.active { background: var(--accent); color:#0b0b10; }
-.grid { display:grid; grid-template-columns: repeat(3,minmax(0,1fr)); gap:16px; }
-@media (max-width: 980px){ .grid{ grid-template-columns: repeat(2,minmax(0,1fr)); } }
-@media (max-width: 640px){ .grid{ grid-template-columns: 1fr; } }
-
-.card { border:1px solid var(--border); border-radius:16px; padding:16px; background:var(--card); }
-.embedwrap { border-radius:12px; overflow: hidden; border:1px solid var(--border); background:#0f0f18; }
-.embedwrap iframe { width:100%; height:240px; border:0; display:block; }
-.cap { font-size: 12px; color: #a3a8b4; margin: 10px 12px; }
-.cap a { color: inherit; text-decoration: underline; text-underline-offset: 2px; }
-.mt { margin-top: 10px; }
-.stats { display:grid; grid-template-columns: repeat(4, minmax(0,1fr)); gap:10px; margin-top:12px; }
-.stat { border:1px solid var(--border); border-radius:12px; padding:10px; }
-.stat .label { font-size: 12px; color: var(--muted); }
-.stat .val { font-size: 16px; font-weight: 700; }
-
-.section { border:1px dashed #6ea8fe55; border-radius:18px; padding:18px; margin-top:12px; background:#121223; }
-.section h3 { margin:0 0 8px 0; font-size:20px; }
-.section p { margin:8px 0; color: var(--fg); }
-.footer { margin-top: 22px; color: var(--muted); font-size: 13px; text-align:center; }
-.small { font-size: 12px; color: var(--muted); }</style>
-</head>
-<body>
-  <div class="container">
-    <header class="header">
-      <h1>Archive</h1>
-      <div class="date">All recent snapshots</div>
-    </header>
-
-    <div class="navrow">
-  <a class="btn" href="/index.html">← Home</a>
-  <a class="btn" href="/index.html">← Forward</a>
-  <span class="spacer"></span>
-  
-  
-</div>
-
-    <div class="section">
-      <h3>Description</h3>
-      <h1>How to bet on polymarket in the us</h1>
-<h2>how to bet in polymarket</h2>
-<p>Event clarity matters for How to bet in polymarket: precise criteria improve pricing and reduce disputes, which can tighten spreads over time.</p>
-<h2>how to buy on polymarket</h2>
-<p>Participants treating How to buy on polymarket as probability estimates still weigh fees, spreads, and risk, especially near resolution windows.</p>
-<h2>polymarket</h2>
-<p>Traders watch spreads and depth around Polymarket to judge pricing quality; unusually tight markets can indicate strong agreement on implied odds.</p>
-<h2>polymarket election</h2>
-<p>Historical performance for Polymarket election varies by event type; accuracy improves with participation, clear resolution criteria, and timely news.</p>
-
-<h2>How to read the dashboard</h2>
-<p>We summarize 24h volume, spread tightness, and momentum to help you explore on-chain prediction markets. Prices reflect crowd-implied probabilities and can change rapidly.</p>
-<p>Use the HOT section to scan liquidity and near-resolution events. Check Overlooked for near-50% setups or markets with favorable underround that may deserve attention.</p>
-<p>This is educational content only and not financial advice. Do your own research and understand the risks before engaging with any market.</p>
-
-    </div>
-
-    <div style="margin-top:16px"><p><a class="btn" style="display:block; text-align:center" href="/index.html">Latest — 08 September 2025 • 18:35 UTC</a></p>
-<p><a class="btn" style="display:block; text-align:center" href="/dashboard_2025-09-08_1252.html">08 September 2025 • 12:52 UTC</a></p>
-<p><a class="btn" style="display:block; text-align:center" href="/dashboard_2025-09-08_1038.html">08 September 2025 • 10:38 UTC</a></p>
-<p><a class="btn" style="display:block; text-align:center" href="/dashboard_2025-09-08_0900.html">08 September 2025 • 09:00 UTC</a></p>
-<p><a class="btn" style="display:block; text-align:center" href="/dashboard_2025-09-08_0637.html">08 September 2025 • 06:37 UTC</a></p>
-<p><a class="btn" style="display:block; text-align:center" href="/dashboard_2025-09-08_0153.html">08 September 2025 • 01:53 UTC</a></p>
-<p><a class="btn" style="display:block; text-align:center" href="/dashboard_2025-09-07_2330.html">07 September 2025 • 23:30 UTC</a></p>
-<p><a class="btn" style="display:block; text-align:center" href="/dashboard_2025-09-07_2323.html">07 September 2025 • 23:23 UTC</a></p></div>
-
-    <div class="footer">Not financial advice. DYOR.</div>
-  </div>
-</body></html>
+*{box-sizing:border-box}body{margin:0;font-family:ui-sans-serif,system-ui,-apple-system,Segoe UI,Roboto,sans-serif;background:var(--bg);color:var(--fg)}
+.container{max-width:1240px;margin:0 auto;padding:32px 24px 44px}
+.header{margin-bottom:18px}.header h1{margin:0;font-size:34px;font-variant:small-caps;letter-spacing:.5px}
+.header .date{color:var(--fg);font-size:20px;font-weight:600;margin-top:6px}
+.header .source{color:var(--muted);font-size:14px;margin-top:6px}
+.navrow{display:flex;align-items:center;gap:12px;margin:8px 0 18px;flex-wrap:wrap}
+.btn{display:inline-flex;align-items:center;gap:8px;padding:10px 14px;border:1px solid var(--border);border-radius:14px;background:transparent;color:var(--fg);text-decoration:none;font-weight:700}
+.tabs{display:grid;grid-template-columns:1fr 1fr;border:1px solid var(--border);border-radius:14px;overflow:hidden;margin:12px 0 22px}
+.tabs button{background:transparent;color:var(--fg);padding:14px 12px;border:0;cursor:pointer;font-weight:700;font-size:14px}
+.tabs button.active{background:var(--accent);color:#0b0b10}
+.grid{display:grid;gap:20px}.cards{grid-template-columns:1fr 1fr 1fr}
+.card{border:1px solid var(--border);border-radius:16px;background:var(--card);overflow:hidden}
+.iframe{width:100%;aspect-ratio:16/9;border:0}
+.card .p{padding:16px}.muted{color:var(--muted)}
+.kpi{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-top:10px}
+.kpi .box{border:1px solid var(--border);border-radius:12px;padding:10px}
+.footer{margin-top:26px;color:var(--muted);font-size:12px;text-align:center}
+a.link{color:inherit;text-decoration:underline dotted}
+.small{font-size:12px;color:var(--muted)}</style>
+<script type="application/ld+json">{"@context":"https://schema.org","@type":"WebPage","name":"Polymarket Dashboards \u2014 Archive","description":"Chronological archive of snapshots generated every ~6 hours.","url":"https://urbanpoly.com/archive.html","dateModified":"2025-09-09T00:01:50.108288+00:00"}</script></head><body><div class="container">
+  <header class="header">
+    <h1>Archive</h1>
+    <div class="navrow"><a class="btn" href="/index.html">Home</a></div>
+  </header>
+  <p><a class="btn" href="/dashboard_2025-09-07_2323.html">2025-09-07 2323</a></p><p><a class="btn" href="/dashboard_2025-09-07_2330.html">2025-09-07 2330</a></p><p><a class="btn" href="/dashboard_2025-09-08_0153.html">2025-09-08 0153</a></p><p><a class="btn" href="/dashboard_2025-09-08_0637.html">2025-09-08 0637</a></p><p><a class="btn" href="/dashboard_2025-09-08_0900.html">2025-09-08 0900</a></p><p><a class="btn" href="/dashboard_2025-09-08_1038.html">2025-09-08 1038</a></p><p><a class="btn" href="/dashboard_2025-09-08_1252.html">2025-09-08 1252</a></p><p><a class="btn" href="/dashboard_2025-09-08_1835.html">2025-09-08 1835</a></p><p><a class="btn" href="/dashboard_2025-09-09_0001.html">2025-09-09 0001</a></p>
+  <footer class="footer small">Not financial advice. DYOR.</footer>
+</div></body></html>
