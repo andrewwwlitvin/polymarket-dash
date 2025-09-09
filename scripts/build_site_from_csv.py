@@ -18,6 +18,10 @@ Also retained:
 
 Added now:
 - Google Tag Manager snippets (head + noscript) with your container ID.
+
+Critical fix:
+- Use the newest polymarket_top12_*.csv (if present) to pick the exact HOT and Hidden Gems sets,
+  matching the fetch step output. Fallback to prior heuristic if top12 file is missing.
 """
 
 import sys, csv, html as html_lib, json, random, re
@@ -55,6 +59,16 @@ def newest_csv_in_data() -> Optional[Path]:
     if not csvs:
         return None
     return sorted(csvs, key=lambda p: p.stat().st_mtime, reverse=True)[0]
+
+def newest_top12_csv() -> Optional[Path]:
+    """
+    Look for the newest polymarket_top12_*.csv. The fetch step often leaves it
+    at repo root; sometimes you may move it into data/. We check both.
+    """
+    candidates = list(ROOT.glob("polymarket_top12_*.csv")) + list(DATA_DIR.glob("polymarket_top12_*.csv"))
+    if not candidates:
+        return None
+    return sorted(candidates, key=lambda p: p.stat().st_mtime, reverse=True)[0]
 
 def read_csv_rows(csv_path: Path) -> List[Dict[str, Any]]:
     with csv_path.open("r", encoding="utf-8") as f:
@@ -244,7 +258,7 @@ def build_nav_back_forward(page_type: str, back_href: Optional[str], fwd_href: O
     back_btn = f"<a class='btn' href='{escape(back_href or '')}' aria-label='Back' {'hidden' if not back_href else ''}>Back <span class='ico'>&rarr;</span></a>"
     fwd_btn  = f"<a class='btn' href='{escape(fwd_href or '')}' aria-label='Forward' {'hidden' if not fwd_href else ''}><span class='ico'>&larr;</span> Forward</a>"
     return f"<div class='navrow' role='navigation' aria-label='Snapshot navigation'>{fwd_btn}<span style='flex:1 1 auto'></span>{back_btn}</div>"
-  
+
 def page_footer(build_dt: datetime, page_type: str, back_href: Optional[str], fwd_href: Optional[str]) -> str:
     """
     Footer with two rows:
@@ -275,10 +289,10 @@ def page_footer(build_dt: datetime, page_type: str, back_href: Optional[str], fw
   <div class="sys">Not financial advice. DYOR.</div>
 </div>
 </body></html>"""
-  
+
 def render_grid(rows: List[Dict[str, Any]]) -> str:
     return "<section class='grid'>" + "\n".join(build_card(r) for r in rows) + "</section>"
-  
+
 def build_card(row: Dict[str, Any]) -> str:
     title = row.get("question") or "(Untitled)"
     url = row.get("url") or ""
@@ -306,7 +320,6 @@ def build_card(row: Dict[str, Any]) -> str:
 </article>""".strip()
 
 # ---------- SEO HEAD (versioned OG/Twitter image) ----------
-
 def page_head(title: str, description: str, canonical: str, og_updated: datetime) -> str:
     """
     Adds:
@@ -376,48 +389,39 @@ def page_head(title: str, description: str, canonical: str, og_updated: datetime
         "</script>\n"
         f"<style>{BASE_CSS}</style>\n"
         "</head><body>\n"
-        f"{GTM_NOSCRIPT}\n"  # <-- GTM noscript right after body open
+        f"{GTM_NOSCRIPT}\n"
     )
 
-def build_nav_top(page_type: str) -> str:
-    return (
-        "<div class='navrow' role='navigation' aria-label='Top utility navigation'>"
-        f"<a class='btn' href='index.html' aria-label='Home' {'hidden' if page_type=='index' else ''}><span class='ico'>&larr;</span> Home</a>"
-        "<span style='flex:1 1 auto'></span>"
-        f"<a class='btn' href='archive.html' aria-label='Archive' {'hidden' if page_type=='archive' else ''}>Archive <span class='ico'>&rarr;</span></a>"
-        "</div>"
-    )
+# ---------- Top-12 resolution helpers ----------
+def _row_key(r: Dict[str, Any]) -> Optional[str]:
+    """Return a stable key preference: id > slug > url > question."""
+    for k in ("id", "slug", "url", "question"):
+        v = r.get(k)
+        if v not in (None, "", "0"):
+            return str(v)
+    return None
 
-def build_nav_back_forward(page_type: str, back_href: Optional[str], fwd_href: Optional[str]) -> str:
-    if page_type == "index":
-        fwd_href = None
-    back_btn = f"<a class='btn' href='{escape(back_href or '')}' aria-label='Back' {'hidden' if not back_href else ''}>Back <span class='ico'>&rarr;</span></a>"
-    fwd_btn  = f"<a class='btn' href='{escape(fwd_href or '')}' aria-label='Forward' {'hidden' if not fwd_href else ''}><span class='ico'>&larr;</span> Forward</a>"
-    return f"<div class='navrow' role='navigation' aria-label='Snapshot navigation'>{fwd_btn}<span style='flex:1 1 auto'></span>{back_btn}</div>"
+def _build_index(rows: List[Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
+    idx: Dict[str, Dict[str, Any]] = {}
+    for r in rows:
+        k = _row_key(r)
+        if k:
+            idx[k] = r
+    return idx
 
-def render_grid(rows: List[Dict[str, Any]]) -> str:
-    return "<section class='grid'>" + "\n".join(build_card(r) for r in rows) + "</section>"
-
-def description_html(short: str, long_html: str) -> str:
-    return f"""
-<div class="section">
-  <h2>Description</h2>
-  <p class="meta-block">{escape(short)}</p>
-  {long_html}
-</div>
-""".strip()
-
-def methodology_html() -> str:
-    return """
-<div class="section">
-  <h2>Methodology</h2>
-  <ul class="meta-block">
-    <li><strong>Hottest</strong>: Prioritizes 24h volume, tighter spreads, and sooner time-to-resolve.</li>
-    <li><strong>Overlooked</strong>: Prefers near-50% binary midpoints, negative underround, moderate 24h volume, and sooner resolution.</li>
-    <li><strong>Why line</strong>: Displays quick cues like “24h $X • TTR Yd” pulled from the Polymarket API.</li>
-  </ul>
-</div>
-""".strip()
+def _resolve_top12_rows(top12_rows: List[Dict[str, Any]], enriched_idx: Dict[str, Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """
+    Map rows from top12 CSV to full enriched rows using id/slug/url/question.
+    If a row can't be mapped, we keep the top12 row as-is (best-effort).
+    """
+    out: List[Dict[str, Any]] = []
+    for r in top12_rows:
+        k = _row_key(r)
+        if k and k in enriched_idx:
+            out.append(enriched_idx[k])
+        else:
+            out.append(r)
+    return out
 
 # -----------------------
 # Main build
@@ -435,35 +439,89 @@ def main() -> int:
         print("ERROR: CSV has no rows")
         return 1
 
-    # HOT = first 12 rows
-    hot = rows[:12]
+    # Prefer using the explicit Top-12 file (matches fetch output exactly).
+    hot: List[Dict[str, Any]]
+    gems: List[Dict[str, Any]]
 
-    # OVERLOOKED = distinct from HOT
-    def rid(r: Dict[str, Any]) -> str:
-        return str(r.get("id") or r.get("slug") or r.get("url") or r.get("question") or id(r))
-    hot_ids = {rid(r) for r in hot}
-
-    seed = []
-    for r in rows:
+    top12_path = newest_top12_csv()
+    if top12_path and top12_path.exists():
         try:
-            near50 = float(r.get("near50Flag") or 0)
-        except Exception:
-            near50 = 0
-        try:
-            under = float(r.get("underround") or 0)
-        except Exception:
-            under = 0
-        if (near50 >= 1 or under < 0) and rid(r) not in hot_ids:
-            seed.append(r)
+            top12_rows = read_csv_rows(top12_path)
+            enriched_idx = _build_index(rows)
 
-    gems = seed[:]
-    if len(gems) < 12:
+            # Assume file order: first 12 HOT, next 12 Hidden Gems.
+            hot_candidates = top12_rows[:12]
+            gem_candidates = top12_rows[12:24]
+
+            hot = _resolve_top12_rows(hot_candidates, enriched_idx)
+            gems = _resolve_top12_rows(gem_candidates, enriched_idx)
+
+            # If the file is shorter or malformed, fall back for any missing part.
+            need_hot = len(hot) < 12
+            need_gems = len(gems) < 12
+
+            if need_hot or need_gems:
+                # Fall back gracefully to previous heuristic for missing slots
+                # (keep already-resolved items in front).
+                taken_keys = { _row_key(r) for r in (hot + gems) if _row_key(r) }
+                # Fill hot from remaining enriched rows
+                for r in rows:
+                    if len(hot) >= 12: break
+                    k = _row_key(r)
+                    if k not in taken_keys:
+                        hot.append(r); taken_keys.add(k)
+                # Fill gems from non-hot rows that meet the near-50/underround idea
+                if len(gems) < 12:
+                    # seed
+                    seed: List[Dict[str, Any]] = []
+                    for r in rows:
+                        try:
+                            near50 = float(r.get("near50Flag") or 0)
+                        except Exception:
+                            near50 = 0
+                        try:
+                            under = float(r.get("underround") or 0)
+                        except Exception:
+                            under = 0
+                        rk = _row_key(r)
+                        if (near50 >= 1 or under < 0) and rk not in taken_keys:
+                            seed.append(r); taken_keys.add(rk)
+                    for r in rows:
+                        if len(seed) >= 12: break
+                        rk = _row_key(r)
+                        if rk not in taken_keys:
+                            seed.append(r); taken_keys.add(rk)
+                    gems = seed[:12]
+        except Exception as e:
+            print(f"[warn] Failed to use top12 file {top12_path.name}: {e}. Falling back to heuristic.")
+            top12_path = None
+
+    if not top12_path:
+        # Previous behavior (heuristic): first 12 rows = HOT; pick gems by near-50 or underround (excluding HOT).
+        hot = rows[:12]
+        def rid(r: Dict[str, Any]) -> str:
+            return str(r.get("id") or r.get("slug") or r.get("url") or r.get("question") or id(r))
+        hot_ids = {rid(r) for r in hot}
+        seed: List[Dict[str, Any]] = []
         for r in rows:
-            if rid(r) not in hot_ids and r not in gems:
-                gems.append(r)
-                if len(gems) >= 12:
-                    break
-    gems = gems[:12]
+            try:
+                near50 = float(r.get("near50Flag") or 0)
+            except Exception:
+                near50 = 0
+            try:
+                under = float(r.get("underround") or 0)
+            except Exception:
+                under = 0
+            if (near50 >= 1 or under < 0) and rid(r) not in hot_ids:
+                seed.append(r)
+        gems = seed[:]
+        if len(gems) < 12:
+            for r in rows:
+                if rid(r) not in hot_ids and r not in gems:
+                    gems.append(r)
+                    if len(gems) >= 12:
+                        break
+        gems = gems[:12]
 
     # descriptions (rotate on index/archive; snapshots freeze)
     hist = load_history()
@@ -486,7 +544,6 @@ def main() -> int:
         og_updated=now,
     )
     top_nav = build_nav_top("index")
-    # Back points to latest snapshot if any
     snaps = sorted(SITE_DIR.glob("dashboard_*.html"))
     back_href_index = snaps[-1].name if snaps else None
     row_nav = build_nav_back_forward("index", back_href_index, None)
@@ -572,7 +629,6 @@ def main() -> int:
     newest_snap = snaps_after[0].name if snaps_after else None
     oldest_snap = snaps_after[-1].name if snaps_after else None
 
-    # Buttons list: newest → index.html, others → their own files
     if snaps_after:
         items_btns: List[str] = []
         for i, p in enumerate(snaps_after):
@@ -602,12 +658,10 @@ def main() -> int:
         "<div class='source'>All published snapshots, newest first.</div>",
         "</header>",
         build_nav_top("archive"),
-        # Archive nav: only Forward (to oldest)
         build_nav_back_forward("archive", None, oldest_snap),
         "<div class='section'><h2>All Snapshots</h2>",
         list_html,
         "</div>",
-        # Archive gets rotating description every run
         description_html(short_desc, long_desc_html),
         methodology_html(),
         "</div>",
