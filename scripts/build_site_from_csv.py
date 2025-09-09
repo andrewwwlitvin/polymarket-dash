@@ -244,7 +244,41 @@ def build_nav_back_forward(page_type: str, back_href: Optional[str], fwd_href: O
     back_btn = f"<a class='btn' href='{escape(back_href or '')}' aria-label='Back' {'hidden' if not back_href else ''}>Back <span class='ico'>&rarr;</span></a>"
     fwd_btn  = f"<a class='btn' href='{escape(fwd_href or '')}' aria-label='Forward' {'hidden' if not fwd_href else ''}><span class='ico'>&larr;</span> Forward</a>"
     return f"<div class='navrow' role='navigation' aria-label='Snapshot navigation'>{fwd_btn}<span style='flex:1 1 auto'></span>{back_btn}</div>"
+  
+def page_footer(build_dt: datetime, page_type: str, back_href: Optional[str], fwd_href: Optional[str]) -> str:
+    """
+    Footer with two rows:
+      1) Utility nav (Home / Archive) — Home hidden on index, Archive hidden on archive.
+      2) Snapshot nav (Forward | Back) — Forward hidden on index.
+    Also shows last-updated timestamp and disclaimer.
+    """
+    # Utility row: Home/Archive
+    util_left  = "" if page_type == "index"   else '<a class="btn" href="index.html"><span class="ico">&larr;</span> Home</a>'
+    util_right = "" if page_type == "archive" else '<a class="btn" href="archive.html">Archive <span class="ico">&rarr;</span></a>'
 
+    # Snapshot row: no Forward on index
+    if page_type == "index":
+        fwd_href = None
+
+    back_btn = f'<a class="btn" href="{escape(back_href or "")}" {"hidden" if not back_href else ""}>Back <span class="ico">&rarr;</span></a>'
+    fwd_btn  = f'<a class="btn" href="{escape(fwd_href or "")}" {"hidden" if not fwd_href else ""}><span class="ico">&larr;</span> Forward</a>'
+
+    return f"""
+<div class="footer">
+  <div class="navrow" role="navigation" aria-label="Footer utility nav">
+    {util_left}<span style="flex:1 1 auto"></span>{util_right}
+  </div>
+  <div class="navrow" role="navigation" aria-label="Footer snapshot nav">
+    {fwd_btn}<span style="flex:1 1 auto"></span>{back_btn}
+  </div>
+  <div class="sys">Last updated: {escape(human_date(build_dt))}</div>
+  <div class="sys">Not financial advice. DYOR.</div>
+</div>
+</body></html>"""
+  
+def render_grid(rows: List[Dict[str, Any]]) -> str:
+    return "<section class='grid'>" + "\n".join(build_card(r) for r in rows) + "</section>"
+  
 def build_card(row: Dict[str, Any]) -> str:
     title = row.get("question") or "(Untitled)"
     url = row.get("url") or ""
@@ -271,10 +305,8 @@ def build_card(row: Dict[str, Any]) -> str:
   </div>
 </article>""".strip()
 
-def render_grid(rows: List[Dict[str, Any]]) -> str:
-    return "<section class='grid'>" + "\n".join(build_card(r) for r in rows) + "</section>"
-
 # ---------- SEO HEAD (versioned OG/Twitter image) ----------
+
 def page_head(title: str, description: str, canonical: str, og_updated: datetime) -> str:
     """
     Adds:
