@@ -1,31 +1,23 @@
 name: Build and publish dashboards
 
 on:
+  workflow_dispatch: {}
   schedule:
-    - cron: "0 */6 * * *"     # every 6 hours (UTC)
-  workflow_dispatch:
-
-permissions:
-  contents: write
+    - cron: "0 */6 * * *"
 
 jobs:
   build:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
-    concurrency:
-      group: deploy-${{ github.ref }}
-      cancel-in-progress: false
     env:
       TZ: Europe/Lisbon
-      REUSE_MINUTES: "0"      # <-- knob: "0" = always fetch new; e.g. "60" = reuse if <60m old
+      REUSE_MINUTES: "0"
+      PYTHONUNBUFFERED: "1"
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
 
-      - name: Setup Python
+      - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
@@ -33,15 +25,11 @@ jobs:
       - name: Install deps
         run: |
           python -m pip install --upgrade pip
-          if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
+          pip install -r requirements.txt
 
-      # ============================
-      # 1) FETCH LATEST CSV (with reuse knob)
-      # ============================
+      # -------- Fetch enriched CSV (KNOWN-GOOD) --------
       - name: Fetch latest markets (fast top-k)
-        timeout-minutes: 15
-        env:
-          PYTHONUNBUFFERED: "1"
+        id: fetch
         run: |
           set -euo pipefail
           WORKDIR="$GITHUB_WORKSPACE"
@@ -60,11 +48,7 @@ jobs:
             echo "LATEST_CSV=$recent" >> "$GITHUB_ENV"
           else
             echo "[fetch] Fetching a NEW CSV..."
-            python -u "$WORKDIR/scripts/polymarket_enriched_fast.py" \
-              --topk 120 \
-              --concurrency 8 \
-              --fast
-
+            python -u "$WORKDIR/scripts/polymarket_enriched_fast.py" --topk 120 --concurrency 8 --fast
             latest=$(find "$WORKDIR" -maxdepth 2 -type f -name 'polymarket_enriched_fast_*.csv' | sort | tail -n1 || true)
             if [ -z "${latest:-}" ]; then
               echo "ERROR: Fetcher did not produce a CSV"; exit 1
@@ -78,18 +62,29 @@ jobs:
           echo "[fetch] data/ listing:"
           ls -lAh "$DATA_DIR" || true
 
-      # ===========================================
-      # 2) BUILD SITE FROM THAT EXACT CSV (STRICT)
-      # ===========================================
-      - name: Generate site (use explicit CSV)
+      # -------- NEW: derive explicit Top-12 file from the enriched CSV --------
+      - name: Derive Top-12 (HOT & OVERLOOKED)
+        run: |
+          set -euo pipefail
+          if [ -z "${LATEST_CSV:-}" ] || [ ! -f "${LATEST_CSV}" ]; then
+            echo "ERROR: LATEST_CSV not set or missing"; exit 1
+          fi
+          python scripts/derive_top12_from_csv.py "${LATEST_CSV}"
+          # move produced top12 csv into data/ and export env var
+          latest_top=$(ls -1t polymarket_top12_*.csv | head -n1)
+          mv "$latest_top" "data/$latest_top"
+          echo "LATEST_TOP12=$GITHUB_WORKSPACE/data/$latest_top" >> "$GITHUB_ENV"
+          echo "::notice title=Derived Top12::data/$latest_top"
+          ls -lAh data || true
+
+      # -------- Build HTML from CSVs --------
+      - name: Build site
         run: |
           set -euo pipefail
           echo "LATEST_CSV env: ${LATEST_CSV:-<empty>}"
-          if [ -z "${LATEST_CSV:-}" ]; then
-            echo "ERROR: LATEST_CSV is not set; aborting."; exit 1
-          fi
-          if [ ! -f "$LATEST_CSV" ]; then
-            echo "ERROR: LATEST_CSV path does not exist: $LATEST_CSV"; exit 1
+          echo "LATEST_TOP12 env: ${LATEST_TOP12:-<empty>}"
+          if [ -z "${LATEST_CSV:-}" ] || [ ! -f "${LATEST_CSV}" ]; then
+            echo "ERROR: LATEST_CSV is not set or missing"; exit 1
           fi
 
           echo "Building site from: $LATEST_CSV"
@@ -99,55 +94,30 @@ jobs:
 
           echo "---- list site/ after build ----"
           ls -lAh "$GITHUB_WORKSPACE/site" || true
-
-          # Guard: fail if sample marker somehow appears
           if grep -q "sample_enriched_20250101_000000.csv" "$GITHUB_WORKSPACE/site/index.html"; then
             echo "ERROR: index.html contains sample marker; refusing to publish."; exit 1
           fi
 
-      # --- diagnostics before committing ---
-      - name: Git status before commit
+      - name: Commit & push site
         run: |
+          set -euo pipefail
           echo "==== git status (before add) ===="
           git status
-          echo "==== diff vs HEAD (site/ & data/) ===="
-          git diff --name-only HEAD -- site/ data/ || true
-
-      - name: Configure Git
-        run: |
-          git config --global --add safe.directory "$GITHUB_WORKSPACE"
-          git config user.name  "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
+          git config user.name "github-actions[bot]"
 
-      # --- HARD FAIL if build didn't modify site/ ---
-      - name: Verify site/ changed
-        run: |
-          set -e
-          if git diff --quiet HEAD -- site/ data/ ; then
-            echo "ERROR: build produced no changes under site/ or data/."; exit 1
+          git add -A site/ data/
+          if git diff --cached --quiet; then
+            echo "No changes to commit."
+            exit 0
           fi
+          git commit -m "Auto-build site $(date -u +'%Y-%m-%d %H:%M:%S')"
+          git push
 
-      # =======================================================
-      # 3) COMMIT & PUSH (REBASE-SAFE; AVOID RACE CONDITIONS)
-      # =======================================================
-      - name: Commit and push artifacts (rebase-safe)
-        env:
-          BRANCH_NAME: ${{ github.ref_name }}
+      - name: Verify site update
         run: |
           set -e
-          echo "==== Staging changes (site/, data/) ===="
-          git add -A site data
-          echo "==== Show staged files ===="
-          git diff --cached --name-only
-          COMMIT_MSG="Auto-build site $(date -u +'%Y-%m-%d %H:%M:%S UTC')"
-          git commit -m "$COMMIT_MSG"
-
-          echo "==== Rebase on latest remote ===="
-          git fetch origin "$BRANCH_NAME" --depth=1 || true
-          git pull --rebase --autostash origin "$BRANCH_NAME" || true
-
-          echo "==== Push ===="
-          git push origin HEAD:"$BRANCH_NAME"
-
-          echo "==== Last commit ===="
-          git --no-pager log -1 --stat
+          if git diff --quiet HEAD~1 HEAD -- site/ data/ ; then
+            echo "ERROR: build produced no new changes under site/ or data/."
+            exit 1
+          fi
