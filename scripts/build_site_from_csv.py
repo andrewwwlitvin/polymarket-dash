@@ -6,7 +6,7 @@ Builds static HTML pages from the latest enriched CSV.
 
 New in this version:
 - ARCHIVE: snapshot list items are rendered as big .btn buttons (not tiny links).
-- ARCHIVE: the newest snapshot entry points to index.html (live page) instead of its own snapshot file.
+- ARCHIVE: the newest snapshot entry points to index.html (live) instead of its own snapshot file.
   (We still write the newest snapshot file for history; the archive list just treats it as "live".)
 
 Also retained:
@@ -15,9 +15,12 @@ Also retained:
 - UTC time everywhere; rotating descriptions for index+archive; frozen for snapshots.
 - robots.txt + sitemap.xml emitted.
 - desc_history.json robust load/save.
+
+Added now:
+- Google Tag Manager snippets (head + noscript) with your container ID.
 """
 
-import sys, csv, html as html_lib, json, random, re  # <-- added re
+import sys, csv, html as html_lib, json, random, re
 from pathlib import Path
 from datetime import datetime, timezone
 from typing import List, Dict, Any, Optional
@@ -153,4 +156,444 @@ body { margin:0; font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI,
 
 .embed-wrap { width:100%; aspect-ratio: 20/9; background:#0f1120; }
 .embed { width:100%; height:100%; border:0; }
-.embed-caption { margin: 6px 14
+.embed-caption { margin: 6px 14px 12px; font-size:12px; color: var(--muted); opacity:.9; }
+.embed-caption a { color: inherit; text-decoration: none; }
+.embed-caption a:hover { text-decoration: underline; }
+
+/* Sections */
+.section { margin-top: 18px; }
+.section h2 { margin:0 0 10px 0; font-size: 16px; }
+.meta-block { margin-top: 18px; color:var(--muted); font-size: 14px; }
+
+/* Archive list as buttons */
+.archive-list { display:grid; gap:12px; grid-template-columns: 1fr; }
+@media (min-width: 680px) { .archive-list { grid-template-columns: 1fr 1fr; } }
+@media (min-width: 1024px) { .archive-list { grid-template-columns: 1fr 1fr 1fr; } }
+.archive-item { display:block; }
+
+/* Footer */
+.footer { margin-top: 26px; border-top:1px solid var(--border); padding-top:18px; color:var(--muted); font-size:12px; text-align:center; }
+.footer .navrow { justify-content:center; margin-top: 10px; }
+
+/* System info */
+.sys { margin-top:8px; font-size: 11px; color: var(--muted); opacity:.85; }
+"""
+
+TABS_JS = """
+<script>
+(function(){
+  const tabHot = document.getElementById('tab-hot');
+  const tabGem = document.getElementById('tab-overlooked');
+  const secHot = document.getElementById('sec-hot');
+  const secGem = document.getElementById('sec-overlooked');
+
+  function activate(which){
+    if(which==='hot'){
+      tabHot.classList.add('active');
+      tabGem.classList.remove('active');
+      secHot.style.display = '';
+      secGem.style.display = 'none';
+    }else{
+      tabGem.classList.add('active');
+      tabHot.classList.remove('active');
+      secGem.style.display = '';
+      secHot.style.display = 'none';
+    }
+  }
+  tabHot?.addEventListener('click', ()=>activate('hot'));
+  tabGem?.addEventListener('click', ()=>activate('overlooked'));
+  // default to HOT visible
+  activate('hot');
+})();
+</script>
+"""
+
+# ------------- Google Tag Manager snippets (safe-string, brace-escaped) -------------
+GTM_ID = "GTM-WJ2H3V7F"
+
+GTM_HEAD = """<!-- Google Tag Manager -->
+<script>(function(w,d,s,l,i){{w[l]=w[l]||[];w[l].push({{'gtm.start':
+new Date().getTime(),event:'gtm.js'}});var f=d.getElementsByTagName(s)[0],
+j=d.createElement(s),dl=l!='dataLayer'?'&l='+l:'';j.async=true;j.src=
+'https://www.googletagmanager.com/gtm.js?id='+i+dl;f.parentNode.insertBefore(j,f);
+}})(window,document,'script','dataLayer','{id}');</script>
+<!-- End Google Tag Manager -->""".format(id=GTM_ID)
+
+GTM_NOSCRIPT = """<!-- Google Tag Manager (noscript) -->
+<noscript><iframe src="https://www.googletagmanager.com/ns.html?id={id}"
+height="0" width="0" style="display:none;visibility:hidden"></iframe></noscript>
+<!-- End Google Tag Manager (noscript) -->""".format(id=GTM_ID)
+
+# -----------------------
+# HTML builders
+# -----------------------
+def build_nav_top(page_type: str) -> str:
+    # Home hidden on index; Archive hidden on archive.
+    return (
+        "<div class='navrow' role='navigation' aria-label='Top utility navigation'>"
+        f"<a class='btn' href='index.html' aria-label='Home' {'hidden' if page_type=='index' else ''}><span class='ico'>&larr;</span> Home</a>"
+        "<span style='flex:1 1 auto'></span>"
+        f"<a class='btn' href='archive.html' aria-label='Archive' {'hidden' if page_type=='archive' else ''}>Archive <span class='ico'>&rarr;</span></a>"
+        "</div>"
+    )
+
+def build_nav_back_forward(page_type: str, back_href: Optional[str], fwd_href: Optional[str]) -> str:
+    # On index: force no Forward
+    if page_type == "index":
+        fwd_href = None
+    back_btn = f"<a class='btn' href='{escape(back_href or '')}' aria-label='Back' {'hidden' if not back_href else ''}>Back <span class='ico'>&rarr;</span></a>"
+    fwd_btn  = f"<a class='btn' href='{escape(fwd_href or '')}' aria-label='Forward' {'hidden' if not fwd_href else ''}><span class='ico'>&larr;</span> Forward</a>"
+    return f"<div class='navrow' role='navigation' aria-label='Snapshot navigation'>{fwd_btn}<span style='flex:1 1 auto'></span>{back_btn}</div>"
+
+def build_card(row: Dict[str, Any]) -> str:
+    title = row.get("question") or "(Untitled)"
+    url = row.get("url") or ""
+    embed = row.get("embedSrc") or ""
+    vol24 = parse_money(row.get("volume24h"))
+    spread = (row.get("avgSpread") or "—")
+    ttr = ttr_from_iso(row.get("endDateISO"))
+    momentum = row.get("momentumPct24h") or row.get("momentumDelta24h") or "—"
+    return f"""
+<article class="card">
+  <div class="embed-wrap">
+    <iframe class="embed" title="{escape(title)}" src="{escape(embed)}" loading="lazy" referrerpolicy="no-referrer-when-downgrade"></iframe>
+  </div>
+  <noscript>This market embed requires JavaScript. View it on Polymarket: <a href="{escape(url)}">{escape(url)}</a></noscript>
+  {caption_text(title, url)}
+  <div class="card-body">
+    <h3>{escape(title)}</h3>
+    <div class="stats">
+      <div class="stat"><span class="lab">24h Vol</span><span class="val">{escape(vol24)}</span></div>
+      <div class="stat"><span class="lab">Avg Spread</span><span class="val">{escape(str(spread))}</span></div>
+      <div class="stat"><span class="lab">Time to Resolve</span><span class="val">{escape(ttr)}</span></div>
+      <div class="stat"><span class="lab">Momentum</span><span class="val">{escape(str(momentum))}</span></div>
+    </div>
+  </div>
+</article>""".strip()
+
+def render_grid(rows: List[Dict[str, Any]]) -> str:
+    return "<section class='grid'>" + "\n".join(build_card(r) for r in rows) + "</section>"
+
+# ---------- SEO HEAD (versioned OG/Twitter image) ----------
+def page_head(title: str, description: str, canonical: str, og_updated: datetime) -> str:
+    """
+    Adds:
+    - unique <title>, <meta name="description">, and page-specific keywords
+    - favicons
+    - JSON-LD (WebSite + WebPage)
+    - versioned OG/Twitter image URL to bust social caches
+    - Google Tag Manager (head)
+    """
+    if canonical.endswith("archive.html"):
+        keywords = "polymarket archive, prediction markets archive, polymarket snapshots, dashboard history"
+    elif canonical.endswith("index.html"):
+        keywords = "polymarket, prediction markets, polymarket odds, election odds, betting markets, dashboard"
+    else:
+        keywords = "polymarket snapshot, prediction markets snapshot, polymarket odds, election odds, dashboard"
+
+    ver = og_updated.strftime("%Y%m%d%H%M")  # cache-buster
+    og_img = f"https://urbanpoly.com/og-preview.png?v={ver}"
+
+    # Structured data
+    website_ld = {
+        "@context": "https://schema.org",
+        "@type": "WebSite",
+        "@id": "https://urbanpoly.com/#website",
+        "url": "https://urbanpoly.com/",
+        "name": "UrbanPoly — Polymarket Dashboard",
+        "description": "Automated Polymarket dashboard highlighting hottest and overlooked markets, refreshed ~6h."
+    }
+    webpage_ld = {
+        "@context": "https://schema.org",
+        "@type": "WebPage",
+        "isPartOf": {"@id": "https://urbanpoly.com/#website"},
+        "url": canonical,
+        "name": title,
+        "description": description,
+        "dateModified": iso_og_time(og_updated)
+    }
+    if canonical.startswith("https://urbanpoly.com/dashboard_"):
+        webpage_ld["datePublished"] = iso_og_time(og_updated)
+
+    json_ld = json.dumps(website_ld, separators=(",", ":")) + "\n" + json.dumps(webpage_ld, separators=(",", ":"))
+
+    return (
+        "<!doctype html><html lang='en'><head>\n"
+        "<meta charset=\"utf-8\" />\n"
+        "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\" />\n"
+        f"<title>{escape(title)}</title>\n"
+        f"<meta name=\"description\" content=\"{escape(description)}\" />\n"
+        f"<meta name=\"keywords\" content=\"{escape(keywords)}\" />\n"
+        f"<link rel=\"canonical\" href=\"{escape(canonical)}\" />\n"
+        "<link rel=\"icon\" href=\"/favicon.ico\" />\n"
+        "<link rel=\"shortcut icon\" href=\"/favicon.ico\" />\n"
+        "<link rel=\"apple-touch-icon\" href=\"/apple-touch-icon.png\" />\n"
+        f"{GTM_HEAD}\n"
+        f"<meta property=\"og:title\" content=\"{escape(title)}\" />\n"
+        f"<meta property=\"og:description\" content=\"{escape(description)}\" />\n"
+        "<meta property=\"og:type\" content=\"website\" />\n"
+        f"<meta property=\"og:url\" content=\"{escape(canonical)}\" />\n"
+        f"<meta property=\"og:image\" content=\"{escape(og_img)}\" />\n"
+        f"<meta property=\"og:updated_time\" content=\"{escape(iso_og_time(og_updated))}\" />\n"
+        "<meta name=\"twitter:card\" content=\"summary_large_image\" />\n"
+        f"<meta name=\"twitter:title\" content=\"{escape(title)}\" />\n"
+        f"<meta name=\"twitter:description\" content=\"{escape(description)}\" />\n"
+        f"<meta name=\"twitter:image\" content=\"{escape(og_img)}\" />\n"
+        "<script type=\"application/ld+json\">\n"
+        f"{json_ld}\n"
+        "</script>\n"
+        f"<style>{BASE_CSS}</style>\n"
+        "</head><body>\n"
+        f"{GTM_NOSCRIPT}\n"  # <-- GTM noscript right after body open
+    )
+
+def build_nav_top(page_type: str) -> str:
+    return (
+        "<div class='navrow' role='navigation' aria-label='Top utility navigation'>"
+        f"<a class='btn' href='index.html' aria-label='Home' {'hidden' if page_type=='index' else ''}><span class='ico'>&larr;</span> Home</a>"
+        "<span style='flex:1 1 auto'></span>"
+        f"<a class='btn' href='archive.html' aria-label='Archive' {'hidden' if page_type=='archive' else ''}>Archive <span class='ico'>&rarr;</span></a>"
+        "</div>"
+    )
+
+def build_nav_back_forward(page_type: str, back_href: Optional[str], fwd_href: Optional[str]) -> str:
+    if page_type == "index":
+        fwd_href = None
+    back_btn = f"<a class='btn' href='{escape(back_href or '')}' aria-label='Back' {'hidden' if not back_href else ''}>Back <span class='ico'>&rarr;</span></a>"
+    fwd_btn  = f"<a class='btn' href='{escape(fwd_href or '')}' aria-label='Forward' {'hidden' if not fwd_href else ''}><span class='ico'>&larr;</span> Forward</a>"
+    return f"<div class='navrow' role='navigation' aria-label='Snapshot navigation'>{fwd_btn}<span style='flex:1 1 auto'></span>{back_btn}</div>"
+
+def render_grid(rows: List[Dict[str, Any]]) -> str:
+    return "<section class='grid'>" + "\n".join(build_card(r) for r in rows) + "</section>"
+
+def description_html(short: str, long_html: str) -> str:
+    return f"""
+<div class="section">
+  <h2>Description</h2>
+  <p class="meta-block">{escape(short)}</p>
+  {long_html}
+</div>
+""".strip()
+
+def methodology_html() -> str:
+    return """
+<div class="section">
+  <h2>Methodology</h2>
+  <ul class="meta-block">
+    <li><strong>Hottest</strong>: Prioritizes 24h volume, tighter spreads, and sooner time-to-resolve.</li>
+    <li><strong>Overlooked</strong>: Prefers near-50% binary midpoints, negative underround, moderate 24h volume, and sooner resolution.</li>
+    <li><strong>Why line</strong>: Displays quick cues like “24h $X • TTR Yd” pulled from the Polymarket API.</li>
+  </ul>
+</div>
+""".strip()
+
+# -----------------------
+# Main build
+# -----------------------
+def main() -> int:
+    SITE_DIR.mkdir(parents=True, exist_ok=True)
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+
+    csv_path = Path(sys.argv[1]) if len(sys.argv) > 1 else newest_csv_in_data()
+    if not csv_path or not csv_path.exists():
+        print("ERROR: No CSV found or provided.")
+        return 1
+    rows = read_csv_rows(csv_path)
+    if not rows:
+        print("ERROR: CSV has no rows")
+        return 1
+
+    # HOT = first 12 rows
+    hot = rows[:12]
+
+    # OVERLOOKED = distinct from HOT
+    def rid(r: Dict[str, Any]) -> str:
+        return str(r.get("id") or r.get("slug") or r.get("url") or r.get("question") or id(r))
+    hot_ids = {rid(r) for r in hot}
+
+    seed = []
+    for r in rows:
+        try:
+            near50 = float(r.get("near50Flag") or 0)
+        except Exception:
+            near50 = 0
+        try:
+            under = float(r.get("underround") or 0)
+        except Exception:
+            under = 0
+        if (near50 >= 1 or under < 0) and rid(r) not in hot_ids:
+            seed.append(r)
+
+    gems = seed[:]
+    if len(gems) < 12:
+        for r in rows:
+            if rid(r) not in hot_ids and r not in gems:
+                gems.append(r)
+                if len(gems) >= 12:
+                    break
+    gems = gems[:12]
+
+    # descriptions (rotate on index/archive; snapshots freeze)
+    hist = load_history()
+    meta_files = sorted(META_DIR.glob("*.txt"))
+    long_files = sorted(LONG_DIR.glob("*.html"))
+    meta_pick = choose_rotating_file(meta_files, hist["recent_meta"])
+    long_pick = choose_rotating_file(long_files, hist["recent_long"])
+    short_desc = (meta_pick.read_text(encoding="utf-8").strip() if meta_pick else "Daily dashboard of Polymarket heat & overlooked opportunities.")
+    long_desc_html = (long_pick.read_text(encoding="utf-8") if long_pick else "<p>Insightful commentary rotates here.</p>")
+    save_history(hist)
+
+    now = utc_now()
+    human = human_date(now)
+
+    # ---------- INDEX ----------
+    head = page_head(
+        title=f"Hottest Markets & Overlooked Chances on Polymarket Today — {human}",
+        description=short_desc[:160],
+        canonical="https://urbanpoly.com/index.html",
+        og_updated=now,
+    )
+    top_nav = build_nav_top("index")
+    # Back points to latest snapshot if any
+    snaps = sorted(SITE_DIR.glob("dashboard_*.html"))
+    back_href_index = snaps[-1].name if snaps else None
+    row_nav = build_nav_back_forward("index", back_href_index, None)
+
+    tabs = """
+<div class="tabs">
+  <button id="tab-hot" class="active">HOT</button>
+  <button id="tab-overlooked">Overlooked</button>
+</div>
+"""
+
+    html_index = [
+        head,
+        "<div class='container'>",
+        "<header class='header'>",
+        "<h1>Hottest Markets &amp; Overlooked Chances on Polymarket Today</h1>",
+        f"<div class='date'>{escape(human)}</div>",
+        "<div class='source'>Source: Polymarket API data.</div>",
+        "</header>",
+        top_nav,
+        row_nav,
+        tabs,
+        "<section id='sec-hot'>", render_grid(hot), "</section>",
+        "<section id='sec-overlooked' style='display:none'>", render_grid(gems), "</section>",
+        description_html(short_desc, long_desc_html),
+        methodology_html(),
+        "</div>",
+        TABS_JS,
+        page_footer(now, "index", back_href_index, None),
+    ]
+    (SITE_DIR / "index.html").write_text("\n".join(html_index), encoding="utf-8")
+
+    # ---------- SNAPSHOT ----------
+    snap_name = ts_for_snapshot(now)
+    head_snap = page_head(
+        title=f"Hottest Markets & Overlooked Chances on Polymarket — {human}",
+        description=short_desc[:160],  # frozen copy
+        canonical=f"https://urbanpoly.com/{snap_name}",
+        og_updated=now,
+    )
+    top_nav_snap = build_nav_top("snapshot")
+    prev_snaps = sorted(SITE_DIR.glob("dashboard_*.html"))
+    back_href_snap = (prev_snaps[-1].name if prev_snaps else "archive.html")
+    fwd_href_snap = "index.html"
+
+    tabs_snap = """
+<div class="tabs">
+  <button id="tab-hot" class="active">HOT</button>
+  <button id="tab-overlooked">Overlooked</button>
+</div>
+"""
+
+    html_snap = [
+        head_snap,
+        "<div class='container'>",
+        "<header class='header'>",
+        "<h1>Hottest Markets &amp; Overlooked Chances on Polymarket</h1>",
+        f"<div class='date'>{escape(human)}</div>",
+        "<div class='source'>Source: Polymarket API data.</div>",
+        "</header>",
+        top_nav_snap,
+        build_nav_back_forward("snapshot", back_href_snap, fwd_href_snap),
+        tabs_snap,
+        "<section id='sec-hot'>", render_grid(hot), "</section>",
+        "<section id='sec-overlooked' style='display:none'>", render_grid(gems), "</section>",
+        # snapshot freezes the picked descriptions
+        description_html(short_desc, long_desc_html),
+        methodology_html(),
+        "</div>",
+        TABS_JS,
+        page_footer(now, "snapshot", back_href_snap, fwd_href_snap),
+    ]
+    (SITE_DIR / snap_name).write_text("\n".join(html_snap), encoding="utf-8")
+
+    # ---------- ARCHIVE ----------
+    head_arch = page_head(
+        title="Polymarket Dashboards — Archive",
+        description=short_desc[:160],  # rotates
+        canonical="https://urbanpoly.com/archive.html",
+        og_updated=now,
+    )
+    snaps_after = sorted(SITE_DIR.glob("dashboard_*.html"), key=lambda p: p.stat().st_mtime, reverse=True)
+    newest_snap = snaps_after[0].name if snaps_after else None
+    oldest_snap = snaps_after[-1].name if snaps_after else None
+
+    # Buttons list: newest → index.html, others → their own files
+    if snaps_after:
+        items_btns: List[str] = []
+        for i, p in enumerate(snaps_after):
+            label = p.name.replace("dashboard_", "").replace(".html", "")
+            if i == 0:
+                items_btns.append(
+                    f"<a class='btn archive-item' href='index.html' aria-label='Open latest snapshot (live)'>"
+                    f"<span class='ico'>&#128336;</span> {escape(label)} (live)"
+                    f"</a>"
+                )
+            else:
+                items_btns.append(
+                    f"<a class='btn archive-item' href='{p.name}' aria-label='Open snapshot {escape(label)}'>"
+                    f"{escape(label)}"
+                    f"</a>"
+                )
+        list_html = "<div class='archive-list'>" + "\n".join(items_btns) + "</div>"
+    else:
+        list_html = "<p>No snapshots yet.</p>"
+
+    html_arch = [
+        head_arch,
+        "<div class='container'>",
+        "<header class='header'>",
+        "<h1>Archive</h1>",
+        f"<div class='date'>{escape(human)}</div>",
+        "<div class='source'>All published snapshots, newest first.</div>",
+        "</header>",
+        build_nav_top("archive"),
+        # Archive nav: only Forward (to oldest)
+        build_nav_back_forward("archive", None, oldest_snap),
+        "<div class='section'><h2>All Snapshots</h2>",
+        list_html,
+        "</div>",
+        # Archive gets rotating description every run
+        description_html(short_desc, long_desc_html),
+        methodology_html(),
+        "</div>",
+        page_footer(now, "archive", None, oldest_snap),
+    ]
+    (SITE_DIR / "archive.html").write_text("\n".join(html_arch), encoding="utf-8")
+
+    # ---------- robots + sitemap ----------
+    (SITE_DIR / "robots.txt").write_text("User-agent: *\nAllow: /\nSitemap: https://urbanpoly.com/sitemap.xml\n", encoding="utf-8")
+    urls = ["index.html", "archive.html"] + [p.name for p in snaps_after]
+    sm = ['<?xml version="1.0" encoding="UTF-8"?>','<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">']
+    for u in urls:
+        sm += [ "<url>", f"<loc>https://urbanpoly.com/{u}</loc>", f"<lastmod>{iso_og_time(now)}</lastmod>", "</url>" ]
+    sm.append("</urlset>")
+    (SITE_DIR / "sitemap.xml").write_text("\n".join(sm), encoding="utf-8")
+
+    print("[ok] Wrote index, snapshot, archive; archive buttons + newest->index mapping applied.")
+    return 0
+
+if __name__ == "__main__":
+    sys.exit(main())
