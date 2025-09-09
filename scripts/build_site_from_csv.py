@@ -6,7 +6,7 @@ Builds static HTML pages from the latest enriched CSV.
 
 New in this version:
 - ARCHIVE: snapshot list items are rendered as big .btn buttons (not tiny links).
-- ARCHIVE: the newest snapshot entry points to index.html (live page) instead of its own snapshot file.
+- ARCHIVE: the newest snapshot entry points to index.html (live) instead of its own snapshot file.
   (We still write the newest snapshot file for history; the archive list just treats it as "live".)
 
 Also retained:
@@ -15,9 +15,12 @@ Also retained:
 - UTC time everywhere; rotating descriptions for index+archive; frozen for snapshots.
 - robots.txt + sitemap.xml emitted.
 - desc_history.json robust load/save.
+
+Added now:
+- Google Tag Manager snippets (head + noscript) with your container ID.
 """
 
-import sys, csv, html as html_lib, json, random
+import sys, csv, html as html_lib, json, random, re
 from pathlib import Path
 from datetime import datetime, timezone
 from typing import List, Dict, Any, Optional
@@ -205,6 +208,22 @@ TABS_JS = """
 </script>
 """
 
+# ------------- Google Tag Manager snippets (safe-string, brace-escaped) -------------
+GTM_ID = "GTM-WJ2H3V7F"
+
+GTM_HEAD = """<!-- Google Tag Manager -->
+<script>(function(w,d,s,l,i){w[l]=w[l]||[];w[l].push({'gtm.start':
+new Date().getTime(),event:'gtm.js'});var f=d.getElementsByTagName(s)[0],
+j=d.createElement(s),dl=l!='dataLayer'?'&l='+l:'';j.async=true;j.src=
+'https://www.googletagmanager.com/gtm.js?id='+i+dl;f.parentNode.insertBefore(j,f);
+})(window,document,'script','dataLayer','{id}');</script>
+<!-- End Google Tag Manager -->""".format(id=GTM_ID)
+
+GTM_NOSCRIPT = """<!-- Google Tag Manager (noscript) -->
+<noscript><iframe src="https://www.googletagmanager.com/ns.html?id={id}"
+height="0" width="0" style="display:none;visibility:hidden"></iframe></noscript>
+<!-- End Google Tag Manager (noscript) -->""".format(id=GTM_ID)
+
 # -----------------------
 # HTML builders
 # -----------------------
@@ -255,21 +274,25 @@ def build_card(row: Dict[str, Any]) -> str:
 def render_grid(rows: List[Dict[str, Any]]) -> str:
     return "<section class='grid'>" + "\n".join(build_card(r) for r in rows) + "</section>"
 
-# ---------- SEO HEAD (ONLY CHANGE MADE) ----------
+# ---------- SEO HEAD (versioned OG/Twitter image) ----------
 def page_head(title: str, description: str, canonical: str, og_updated: datetime) -> str:
     """
     Adds:
     - unique <title>, <meta name="description">, and page-specific keywords
     - favicons
     - JSON-LD (WebSite + WebPage)
+    - versioned OG/Twitter image URL to bust social caches
+    - Google Tag Manager (head)
     """
-    # page-specific keywords (kept simple to avoid wider code changes)
     if canonical.endswith("archive.html"):
         keywords = "polymarket archive, prediction markets archive, polymarket snapshots, dashboard history"
     elif canonical.endswith("index.html"):
         keywords = "polymarket, prediction markets, polymarket odds, election odds, betting markets, dashboard"
     else:
         keywords = "polymarket snapshot, prediction markets snapshot, polymarket odds, election odds, dashboard"
+
+    ver = og_updated.strftime("%Y%m%d%H%M")  # cache-buster
+    og_img = f"https://urbanpoly.com/og-preview.png?v={ver}"
 
     # Structured data
     website_ld = {
@@ -294,50 +317,54 @@ def page_head(title: str, description: str, canonical: str, og_updated: datetime
 
     json_ld = json.dumps(website_ld, separators=(",", ":")) + "\n" + json.dumps(webpage_ld, separators=(",", ":"))
 
-    return f"""<!doctype html><html lang='en'><head>
-<meta charset="utf-8" />
-<meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>{escape(title)}</title>
-<meta name="description" content="{escape(description)}" />
-<meta name="keywords" content="{escape(keywords)}" />
-<link rel="canonical" href="{escape(canonical)}" />
-<link rel="icon" href="/favicon.ico" />
-<link rel="shortcut icon" href="/favicon.ico" />
-<link rel="apple-touch-icon" href="/apple-touch-icon.png" />
-<meta property="og:title" content="{escape(title)}" />
-<meta property="og:description" content="{escape(description)}" />
-<meta property="og:type" content="website" />
-<meta property="og:url" content="{escape(canonical)}" />
-<meta property="og:image" content="https://urbanpoly.com/og-preview.png" />
-<meta property="og:updated_time" content="{escape(iso_og_time(og_updated))}" />
-<meta name="twitter:card" content="summary_large_image" />
-<meta name="twitter:title" content="{escape(title)}" />
-<meta name="twitter:description" content="{escape(description)}" />
-<meta name="twitter:image" content="https://urbanpoly.com/og-preview.png" />
-<script type="application/ld+json">
-{json_ld}
-</script>
-<style>{BASE_CSS}</style>
-</head><body>
-"""
+    return (
+        "<!doctype html><html lang='en'><head>\n"
+        "<meta charset=\"utf-8\" />\n"
+        "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\" />\n"
+        f"<title>{escape(title)}</title>\n"
+        f"<meta name=\"description\" content=\"{escape(description)}\" />\n"
+        f"<meta name=\"keywords\" content=\"{escape(keywords)}\" />\n"
+        f"<link rel=\"canonical\" href=\"{escape(canonical)}\" />\n"
+        "<link rel=\"icon\" href=\"/favicon.ico\" />\n"
+        "<link rel=\"shortcut icon\" href=\"/favicon.ico\" />\n"
+        "<link rel=\"apple-touch-icon\" href=\"/apple-touch-icon.png\" />\n"
+        f"{GTM_HEAD}\n"
+        f"<meta property=\"og:title\" content=\"{escape(title)}\" />\n"
+        f"<meta property=\"og:description\" content=\"{escape(description)}\" />\n"
+        "<meta property=\"og:type\" content=\"website\" />\n"
+        f"<meta property=\"og:url\" content=\"{escape(canonical)}\" />\n"
+        f"<meta property=\"og:image\" content=\"{escape(og_img)}\" />\n"
+        f"<meta property=\"og:updated_time\" content=\"{escape(iso_og_time(og_updated))}\" />\n"
+        "<meta name=\"twitter:card\" content=\"summary_large_image\" />\n"
+        f"<meta name=\"twitter:title\" content=\"{escape(title)}\" />\n"
+        f"<meta name=\"twitter:description\" content=\"{escape(description)}\" />\n"
+        f"<meta name=\"twitter:image\" content=\"{escape(og_img)}\" />\n"
+        "<script type=\"application/ld+json\">\n"
+        f"{json_ld}\n"
+        "</script>\n"
+        f"<style>{BASE_CSS}</style>\n"
+        "</head><body>\n"
+        f"{GTM_NOSCRIPT}\n"  # <-- GTM noscript right after body open
+    )
 
-def page_footer(build_dt: datetime, page_type: str, back_href: Optional[str], fwd_href: Optional[str]) -> str:
-    util_left  = "" if page_type=="index"   else '<a class="btn" href="index.html"><span class="ico">&larr;</span> Home</a>'
-    util_right = "" if page_type=="archive" else '<a class="btn" href="archive.html">Archive <span class="ico">&rarr;</span></a>'
-    # Index: Forward hidden
-    if page_type == "index": fwd_href = None
-    back_btn = f'<a class="btn" href="{escape(back_href or "")}" {"hidden" if not back_href else ""}>Back <span class="ico">&rarr;</span></a>'
-    fwd_btn  = f'<a class="btn" href="{escape(fwd_href or "")}" {"hidden" if not fwd_href else ""}><span class="ico">&larr;</span> Forward</a>'
-    return f"""
-<div class="footer">
-  <div class="navrow" role="navigation" aria-label="Footer utility nav">
-    {util_left}<span style="flex:1 1 auto"></span>{util_right}
-  </div>
-  <div class="navrow" role="navigation" aria-label="Footer snapshot nav">{fwd_btn}<span style="flex:1 1 auto"></span>{back_btn}</div>
-  <div class="sys">Last updated: {escape(human_date(build_dt))}</div>
-  <div class="sys">Not financial advice. DYOR.</div>
-</div>
-</body></html>"""
+def build_nav_top(page_type: str) -> str:
+    return (
+        "<div class='navrow' role='navigation' aria-label='Top utility navigation'>"
+        f"<a class='btn' href='index.html' aria-label='Home' {'hidden' if page_type=='index' else ''}><span class='ico'>&larr;</span> Home</a>"
+        "<span style='flex:1 1 auto'></span>"
+        f"<a class='btn' href='archive.html' aria-label='Archive' {'hidden' if page_type=='archive' else ''}>Archive <span class='ico'>&rarr;</span></a>"
+        "</div>"
+    )
+
+def build_nav_back_forward(page_type: str, back_href: Optional[str], fwd_href: Optional[str]) -> str:
+    if page_type == "index":
+        fwd_href = None
+    back_btn = f"<a class='btn' href='{escape(back_href or '')}' aria-label='Back' {'hidden' if not back_href else ''}>Back <span class='ico'>&rarr;</span></a>"
+    fwd_btn  = f"<a class='btn' href='{escape(fwd_href or '')}' aria-label='Forward' {'hidden' if not fwd_href else ''}><span class='ico'>&larr;</span> Forward</a>"
+    return f"<div class='navrow' role='navigation' aria-label='Snapshot navigation'>{fwd_btn}<span style='flex:1 1 auto'></span>{back_btn}</div>"
+
+def render_grid(rows: List[Dict[str, Any]]) -> str:
+    return "<section class='grid'>" + "\n".join(build_card(r) for r in rows) + "</section>"
 
 def description_html(short: str, long_html: str) -> str:
     return f"""
@@ -367,7 +394,6 @@ def main() -> int:
     SITE_DIR.mkdir(parents=True, exist_ok=True)
     DATA_DIR.mkdir(parents=True, exist_ok=True)
 
-    # CSV
     csv_path = Path(sys.argv[1]) if len(sys.argv) > 1 else newest_csv_in_data()
     if not csv_path or not csv_path.exists():
         print("ERROR: No CSV found or provided.")
@@ -385,7 +411,6 @@ def main() -> int:
         return str(r.get("id") or r.get("slug") or r.get("url") or r.get("question") or id(r))
     hot_ids = {rid(r) for r in hot}
 
-    # Seed pool (near50Flag==1 OR underround<0), exclude HOT
     seed = []
     for r in rows:
         try:
@@ -400,7 +425,6 @@ def main() -> int:
             seed.append(r)
 
     gems = seed[:]
-    # Backfill ONLY from non-HOT rows until 12
     if len(gems) < 12:
         for r in rows:
             if rid(r) not in hot_ids and r not in gems:
@@ -429,12 +453,10 @@ def main() -> int:
         canonical="https://urbanpoly.com/index.html",
         og_updated=now,
     )
-    # top row (Home hidden on index)
     top_nav = build_nav_top("index")
     # Back points to latest snapshot if any
     snaps = sorted(SITE_DIR.glob("dashboard_*.html"))
     back_href_index = snaps[-1].name if snaps else None
-    # No Forward on index
     row_nav = build_nav_back_forward("index", back_href_index, None)
 
     tabs = """
@@ -473,9 +495,7 @@ def main() -> int:
         canonical=f"https://urbanpoly.com/{snap_name}",
         og_updated=now,
     )
-    # Snapshot top utility nav (both visible)
     top_nav_snap = build_nav_top("snapshot")
-    # Snapshot Back = previous snapshot or archive; Forward = index
     prev_snaps = sorted(SITE_DIR.glob("dashboard_*.html"))
     back_href_snap = (prev_snaps[-1].name if prev_snaps else "archive.html")
     fwd_href_snap = "index.html"
@@ -526,7 +546,6 @@ def main() -> int:
         for i, p in enumerate(snaps_after):
             label = p.name.replace("dashboard_", "").replace(".html", "")
             if i == 0:
-                # newest maps to index.html
                 items_btns.append(
                     f"<a class='btn archive-item' href='index.html' aria-label='Open latest snapshot (live)'>"
                     f"<span class='ico'>&#128336;</span> {escape(label)} (live)"
