@@ -4,27 +4,19 @@
 """
 Builds static HTML pages from the latest enriched CSV.
 
-New in this version:
-- ARCHIVE: snapshot list items are rendered as big .btn buttons (not tiny links).
-- ARCHIVE: the newest snapshot entry points to index.html (live) instead of its own snapshot file.
-  (We still write the newest snapshot file for history; the archive list just treats it as "live".)
+- Prefers explicit Top-12 from LATEST_TOP12 (bucket=HOT/OVERLOOKED, rank=1..12).
+- Falls back to local ranking when LATEST_TOP12 is missing.
 
-Also retained:
-- Tabs show ONE section at a time; Overlooked distinct from HOT.
-- Navigation consistency (header & footer); index shows Back only; archive shows Forward-only; snapshots show Back+Forward.
-- UTC time everywhere; rotating descriptions for index+archive; frozen for snapshots.
-- robots.txt + sitemap.xml emitted.
-- desc_history.json robust load/save.
-
-Added now:
-- Google Tag Manager snippets (head + noscript) with your container ID.
-
-Minimal patch in this file:
-- After writing pages, re-chain Forward/Back across ALL snapshot files so
-  older snapshots point Forward to the next snapshot (not index).
+Retains:
+- Archive buttons, newest→index mapping
+- Tabs and card styling
+- UTC timestamps; rotating descriptions on index+archive; frozen on snapshots
+- robots.txt + sitemap.xml
+- GTM injected (head + noscript)
+- Favicons + JSON-LD
 """
 
-import sys, csv, html as html_lib, json, random, re
+import os, sys, csv, html as html_lib, json, random, re
 from pathlib import Path
 from datetime import datetime, timezone
 from typing import List, Dict, Any, Optional
@@ -122,8 +114,31 @@ def ttr_from_iso(end_iso: Optional[str]) -> str:
     except Exception:
         return "—"
 
+def fnum(row: Dict[str, Any], key: str, default: float = 0.0) -> float:
+    try:
+        v = row.get(key)
+        return float(v) if v not in (None, "", "—") else default
+    except Exception:
+        return default
+
+def ttr_days(row: Dict[str, Any]) -> float:
+    td = row.get("timeToResolveDays")
+    try:
+        if td not in (None, "", "—"):
+            return float(td)
+    except Exception:
+        pass
+    return 9e9
+
+def vol24(row: Dict[str, Any]) -> float:
+    v = row.get("volume24h") or row.get("vol24h") or row.get("volume")
+    try:
+        return float(v) if v not in (None, "", "—") else 0.0
+    except Exception:
+        return 0.0
+
 # -----------------------
-# Templating
+# Templating (unchanged)
 # -----------------------
 BASE_CSS = """
 :root { --bg:#0b0b10; --fg:#eaeaf0; --muted:#a3a8b4; --card:#141420; --border:#232336; --accent:#6ea8fe; --accent-2:#a879fe; }
@@ -206,15 +221,13 @@ TABS_JS = """
   }
   tabHot?.addEventListener('click', ()=>activate('hot'));
   tabGem?.addEventListener('click', ()=>activate('overlooked'));
-  // default to HOT visible
   activate('hot');
 })();
 </script>
 """
 
-# ------------- Google Tag Manager snippets (safe-string, brace-escaped) -------------
+# ------------- Google Tag Manager (escaped braces for f-strings) -------------
 GTM_ID = "GTM-WJ2H3V7F"
-
 GTM_HEAD = """<!-- Google Tag Manager -->
 <script>(function(w,d,s,l,i){{w[l]=w[l]||[];w[l].push({{'gtm.start':
 new Date().getTime(),event:'gtm.js'}});var f=d.getElementsByTagName(s)[0],
@@ -229,10 +242,9 @@ height="0" width="0" style="display:none;visibility:hidden"></iframe></noscript>
 <!-- End Google Tag Manager (noscript) -->""".format(id=GTM_ID)
 
 # -----------------------
-# HTML builders
+# HTML builders (unchanged)
 # -----------------------
 def build_nav_top(page_type: str) -> str:
-    # Home hidden on index; Archive hidden on archive.
     return (
         "<div class='navrow' role='navigation' aria-label='Top utility navigation'>"
         f"<a class='btn' href='index.html' aria-label='Home' {'hidden' if page_type=='index' else ''}><span class='ico'>&larr;</span> Home</a>"
@@ -242,31 +254,19 @@ def build_nav_top(page_type: str) -> str:
     )
 
 def build_nav_back_forward(page_type: str, back_href: Optional[str], fwd_href: Optional[str]) -> str:
-    # On index: force no Forward
     if page_type == "index":
         fwd_href = None
     back_btn = f"<a class='btn' href='{escape(back_href or '')}' aria-label='Back' {'hidden' if not back_href else ''}>Back <span class='ico'>&rarr;</span></a>"
     fwd_btn  = f"<a class='btn' href='{escape(fwd_href or '')}' aria-label='Forward' {'hidden' if not fwd_href else ''}><span class='ico'>&larr;</span> Forward</a>"
     return f"<div class='navrow' role='navigation' aria-label='Snapshot navigation'>{fwd_btn}<span style='flex:1 1 auto'></span>{back_btn}</div>"
-  
+
 def page_footer(build_dt: datetime, page_type: str, back_href: Optional[str], fwd_href: Optional[str]) -> str:
-    """
-    Footer with two rows:
-      1) Utility nav (Home / Archive) — Home hidden on index, Archive hidden on archive.
-      2) Snapshot nav (Forward | Back) — Forward hidden on index.
-    Also shows last-updated timestamp and disclaimer.
-    """
-    # Utility row: Home/Archive
     util_left  = "" if page_type == "index"   else '<a class="btn" href="index.html"><span class="ico">&larr;</span> Home</a>'
     util_right = "" if page_type == "archive" else '<a class="btn" href="archive.html">Archive <span class="ico">&rarr;</span></a>'
-
-    # Snapshot row: no Forward on index
     if page_type == "index":
         fwd_href = None
-
     back_btn = f'<a class="btn" href="{escape(back_href or "")}" {"hidden" if not back_href else ""}>Back <span class="ico">&rarr;</span></a>'
     fwd_btn  = f'<a class="btn" href="{escape(fwd_href or "")}" {"hidden" if not fwd_href else ""}><span class="ico">&larr;</span> Forward</a>'
-
     return f"""
 <div class="footer">
   <div class="navrow" role="navigation" aria-label="Footer utility nav">
@@ -279,10 +279,10 @@ def page_footer(build_dt: datetime, page_type: str, back_href: Optional[str], fw
   <div class="sys">Not financial advice. DYOR.</div>
 </div>
 </body></html>"""
-  
+
 def render_grid(rows: List[Dict[str, Any]]) -> str:
     return "<section class='grid'>" + "\n".join(build_card(r) for r in rows) + "</section>"
-  
+
 def build_card(row: Dict[str, Any]) -> str:
     title = row.get("question") or "(Untitled)"
     url = row.get("url") or ""
@@ -309,16 +309,8 @@ def build_card(row: Dict[str, Any]) -> str:
   </div>
 </article>""".strip()
 
-# ---------- SEO HEAD (versioned OG/Twitter image) ----------
+# ---------- SEO HEAD ----------
 def page_head(title: str, description: str, canonical: str, og_updated: datetime) -> str:
-    """
-    Adds:
-    - unique <title>, <meta name="description">, and page-specific keywords
-    - favicons
-    - JSON-LD (WebSite + WebPage)
-    - versioned OG/Twitter image URL to bust social caches
-    - Google Tag Manager (head)
-    """
     if canonical.endswith("archive.html"):
         keywords = "polymarket archive, prediction markets archive, polymarket snapshots, dashboard history"
     elif canonical.endswith("index.html"):
@@ -326,10 +318,9 @@ def page_head(title: str, description: str, canonical: str, og_updated: datetime
     else:
         keywords = "polymarket snapshot, prediction markets snapshot, polymarket odds, election odds, dashboard"
 
-    ver = og_updated.strftime("%Y%m%d%H%M")  # cache-buster
+    ver = og_updated.strftime("%Y%m%d%H%M")
     og_img = f"https://urbanpoly.com/og-preview.png?v={ver}"
 
-    # Structured data
     website_ld = {
         "@context": "https://schema.org",
         "@type": "WebSite",
@@ -379,27 +370,8 @@ def page_head(title: str, description: str, canonical: str, og_updated: datetime
         "</script>\n"
         f"<style>{BASE_CSS}</style>\n"
         "</head><body>\n"
-        f"{GTM_NOSCRIPT}\n"  # <-- GTM noscript right after body open
+        f"{GTM_NOSCRIPT}\n"
     )
-
-def build_nav_top(page_type: str) -> str:
-    return (
-        "<div class='navrow' role='navigation' aria-label='Top utility navigation'>"
-        f"<a class='btn' href='index.html' aria-label='Home' {'hidden' if page_type=='index' else ''}><span class='ico'>&larr;</span> Home</a>"
-        "<span style='flex:1 1 auto'></span>"
-        f"<a class='btn' href='archive.html' aria-label='Archive' {'hidden' if page_type=='archive' else ''}>Archive <span class='ico'>&rarr;</span></a>"
-        "</div>"
-    )
-
-def build_nav_back_forward(page_type: str, back_href: Optional[str], fwd_href: Optional[str]) -> str:
-    if page_type == "index":
-        fwd_href = None
-    back_btn = f"<a class='btn' href='{escape(back_href or '')}' aria-label='Back' {'hidden' if not back_href else ''}>Back <span class='ico'>&rarr;</span></a>"
-    fwd_btn  = f"<a class='btn' href='{escape(fwd_href or '')}' aria-label='Forward' {'hidden' if not fwd_href else ''}><span class='ico'>&larr;</span> Forward</a>"
-    return f"<div class='navrow' role='navigation' aria-label='Snapshot navigation'>{fwd_btn}<span style='flex:1 1 auto'></span>{back_btn}</div>"
-
-def render_grid(rows: List[Dict[str, Any]]) -> str:
-    return "<section class='grid'>" + "\n".join(build_card(r) for r in rows) + "</section>"
 
 def description_html(short: str, long_html: str) -> str:
     return f"""
@@ -423,57 +395,42 @@ def methodology_html() -> str:
 """.strip()
 
 # -----------------------
-# Minimal post-build patch to chain snapshot navs
+# Minimal post-build patch to chain snapshot navs (ONLY change added)
 # -----------------------
 def _rewrite_snapshot_nav_html(html: str, back_href: str, fwd_href: str) -> str:
-    """
-    Update snapshot navigation hrefs in both header and footer nav rows.
-    Matches the buttons by their aria-labels to avoid touching other links.
-    """
-    def rep_forward(m):
-        before, _, after = m.group(1), m.group(2), m.group(3)
-        return f'{before}href="{escape(fwd_href)}"{after}'
-
+    """Update snapshot nav hrefs (header+footer) identified by aria-labels."""
+    def rep_fwd(m):
+        pre, _, post = m.group(1), m.group(2), m.group(3)
+        return f'{pre}href="{escape(fwd_href)}"{post}'
     def rep_back(m):
-        before, _, after = m.group(1), m.group(2), m.group(3)
-        return f'{before}href="{escape(back_href)}"{after}'
-
-    # Forward button (aria-label="Forward")
+        pre, _, post = m.group(1), m.group(2), m.group(3)
+        return f'{pre}href="{escape(back_href)}"{post}'
+    # Forward
     html = re.sub(
         r'(<a\s+class=[\'"]btn[\'"][^>]*\saria-label=[\'"]Forward[\'"][^>]*\s)href=(["\']).*?\2([^>]*>)',
-        rep_forward,
-        html,
-        flags=re.IGNORECASE
+        rep_fwd, html, flags=re.IGNORECASE
     )
-    # Back button (aria-label="Back")
+    # Back
     html = re.sub(
         r'(<a\s+class=[\'"]btn[\'"][^>]*\saria-label=[\'"]Back[\'"][^>]*\s)href=(["\']).*?\2([^>]*>)',
-        rep_back,
-        html,
-        flags=re.IGNORECASE
+        rep_back, html, flags=re.IGNORECASE
     )
     return html
 
-
 def _rechain_all_snapshots(site_dir: Path) -> None:
-    """
-    After generating the new snapshot, re-link Forward/Back across all snapshots:
-      - Back = previous snapshot or archive.html
-      - Forward = next snapshot or index.html
-    """
+    """Back = previous snapshot or archive.html; Forward = next snapshot or index.html."""
     snaps = sorted(site_dir.glob("dashboard_*.html"), key=lambda p: p.name)
     if not snaps:
         return
-    for idx, p in enumerate(snaps):
-        back_href = snaps[idx - 1].name if idx > 0 else "archive.html"
-        fwd_href  = snaps[idx + 1].name if idx < len(snaps) - 1 else "index.html"
+    for i, p in enumerate(snaps):
+        back_href = snaps[i-1].name if i > 0 else "archive.html"
+        fwd_href  = snaps[i+1].name if i < len(snaps)-1 else "index.html"
         try:
             html = p.read_text(encoding="utf-8")
             new_html = _rewrite_snapshot_nav_html(html, back_href, fwd_href)
             if new_html != html:
                 p.write_text(new_html, encoding="utf-8")
         except Exception:
-            # Don't fail the build if one file has odd HTML; just skip gracefully.
             pass
 
 # -----------------------
@@ -492,35 +449,50 @@ def main() -> int:
         print("ERROR: CSV has no rows")
         return 1
 
-    # HOT = first 12 rows
-    hot = rows[:12]
+    # Try to consume explicit Top12 file
+    top12_env = os.environ.get("LATEST_TOP12", "").strip()
+    hot_rows: List[Dict[str, Any]] = []
+    gems_rows: List[Dict[str, Any]] = []
 
-    # OVERLOOKED = distinct from HOT
-    def rid(r: Dict[str, Any]) -> str:
-        return str(r.get("id") or r.get("slug") or r.get("url") or r.get("question") or id(r))
-    hot_ids = {rid(r) for r in hot}
+    if top12_env and Path(top12_env).exists():
+        sel = read_csv_rows(Path(top12_env))
+        # Keep stable ordering using 'bucket' + numeric 'rank'
+        def key_rank(r): 
+            try:
+                return int(r.get("rank") or 0)
+            except Exception:
+                return 0
 
-    seed = []
-    for r in rows:
-        try:
-            near50 = float(r.get("near50Flag") or 0)
-        except Exception:
-            near50 = 0
-        try:
-            under = float(r.get("underround") or 0)
-        except Exception:
-            under = 0
-        if (near50 >= 1 or under < 0) and rid(r) not in hot_ids:
-            seed.append(r)
+        hot_rows   = sorted([r for r in sel if (r.get("bucket") or "").upper()=="HOT"], key=key_rank)[:12]
+        gems_rows  = sorted([r for r in sel if (r.get("bucket") or "").upper()=="OVERLOOKED"], key=key_rank)[:12]
 
-    gems = seed[:]
-    if len(gems) < 12:
+    # Fallback: compute locally if selection missing or incomplete
+    if len(hot_rows) < 12 or len(gems_rows) < 12:
+        # HOT by volume desc, TTR asc
+        scored = [(vol24(r), ttr_days(r), r) for r in rows]
+        scored.sort(key=lambda x: (-x[0], x[1]))
+        hot_rows = [r for _, __, r in scored[:12]]
+
+        # OVERLOOKED
+        hot_ids = set(str(r.get("id") or r.get("slug") or r.get("url") or r.get("question") or id(r)) for r in hot_rows)
+        pool = []
         for r in rows:
-            if rid(r) not in hot_ids and r not in gems:
-                gems.append(r)
-                if len(gems) >= 12:
+            rid = str(r.get("id") or r.get("slug") or r.get("url") or r.get("question") or id(r))
+            if rid in hot_ids:
+                continue
+            near50 = fnum(r, "near50Flag", 0.0)
+            under = fnum(r, "underround", 0.0)
+            pool.append((near50, under, ttr_days(r), r))
+        pool.sort(key=lambda x: (-x[0], x[1], x[2]))
+        gems_rows = [r for _, __, ___, r in pool[:12]]
+        if len(gems_rows) < 12:
+            for _, __, ___, r in pool[12:]:
+                rid = str(r.get("id") or r.get("slug") or r.get("url") or r.get("question") or id(r))
+                if rid in hot_ids or r in gems_rows:
+                    continue
+                gems_rows.append(r)
+                if len(gems_rows) >= 12:
                     break
-    gems = gems[:12]
 
     # descriptions (rotate on index/archive; snapshots freeze)
     hist = load_history()
@@ -543,7 +515,6 @@ def main() -> int:
         og_updated=now,
     )
     top_nav = build_nav_top("index")
-    # Back points to latest snapshot if any
     snaps = sorted(SITE_DIR.glob("dashboard_*.html"))
     back_href_index = snaps[-1].name if snaps else None
     row_nav = build_nav_back_forward("index", back_href_index, None)
@@ -566,8 +537,8 @@ def main() -> int:
         top_nav,
         row_nav,
         tabs,
-        "<section id='sec-hot'>", render_grid(hot), "</section>",
-        "<section id='sec-overlooked' style='display:none'>", render_grid(gems), "</section>",
+        "<section id='sec-hot'>", render_grid(hot_rows), "</section>",
+        "<section id='sec-overlooked' style='display:none'>", render_grid(gems_rows), "</section>",
         description_html(short_desc, long_desc_html),
         methodology_html(),
         "</div>",
@@ -580,7 +551,7 @@ def main() -> int:
     snap_name = ts_for_snapshot(now)
     head_snap = page_head(
         title=f"Hottest Markets & Overlooked Chances on Polymarket — {human}",
-        description=short_desc[:160],  # frozen copy
+        description=short_desc[:160],
         canonical=f"https://urbanpoly.com/{snap_name}",
         og_updated=now,
     )
@@ -607,9 +578,8 @@ def main() -> int:
         top_nav_snap,
         build_nav_back_forward("snapshot", back_href_snap, fwd_href_snap),
         tabs_snap,
-        "<section id='sec-hot'>", render_grid(hot), "</section>",
-        "<section id='sec-overlooked' style='display:none'>", render_grid(gems), "</section>",
-        # snapshot freezes the picked descriptions
+        "<section id='sec-hot'>", render_grid(hot_rows), "</section>",
+        "<section id='sec-overlooked' style='display:none'>", render_grid(gems_rows), "</section>",
         description_html(short_desc, long_desc_html),
         methodology_html(),
         "</div>",
@@ -621,21 +591,18 @@ def main() -> int:
     # ---------- ARCHIVE ----------
     head_arch = page_head(
         title="Polymarket Dashboards — Archive",
-        description=short_desc[:160],  # rotates
+        description=short_desc[:160],
         canonical="https://urbanpoly.com/archive.html",
         og_updated=now,
     )
     snaps_after = sorted(SITE_DIR.glob("dashboard_*.html"), key=lambda p: p.stat().st_mtime, reverse=True)
-    newest_snap = snaps_after[0].name if snaps_after else None
     oldest_snap = snaps_after[-1].name if snaps_after else None
 
-    # Buttons list: newest → index.html, others → their own files
     if snaps_after:
         items_btns: List[str] = []
         for i, p in enumerate(snaps_after):
             label = p.name.replace("dashboard_", "").replace(".html", "")
             if i == 0:
-                # newest maps to index.html
                 items_btns.append(
                     f"<a class='btn archive-item' href='index.html' aria-label='Open latest snapshot (live)'>"
                     f"<span class='ico'>&#128336;</span> {escape(label)} (live)"
@@ -660,12 +627,10 @@ def main() -> int:
         "<div class='source'>All published snapshots, newest first.</div>",
         "</header>",
         build_nav_top("archive"),
-        # Archive nav: only Forward (to oldest)
         build_nav_back_forward("archive", None, oldest_snap),
         "<div class='section'><h2>All Snapshots</h2>",
         list_html,
         "</div>",
-        # Archive gets rotating description every run
         description_html(short_desc, long_desc_html),
         methodology_html(),
         "</div>",
@@ -673,19 +638,19 @@ def main() -> int:
     ]
     (SITE_DIR / "archive.html").write_text("\n".join(html_arch), encoding="utf-8")
 
-    # ---- Re-chain Forward/Back across ALL snapshots (minimal patch) ----
+    # ---------- (ONLY CHANGE THAT AFFECTS NAVIGATION) Re-chain all snapshots ----------
     _rechain_all_snapshots(SITE_DIR)
 
     # ---------- robots + sitemap ----------
     (SITE_DIR / "robots.txt").write_text("User-agent: *\nAllow: /\nSitemap: https://urbanpoly.com/sitemap.xml\n", encoding="utf-8")
-    urls = ["index.html", "archive.html"] + [p.name for p in sorted(SITE_DIR.glob("dashboard_*.html"))]
+    urls = ["index.html", "archive.html"] + [p.name for p in snaps_after]
     sm = ['<?xml version="1.0" encoding="UTF-8"?>','<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">']
     for u in urls:
         sm += [ "<url>", f"<loc>https://urbanpoly.com/{u}</loc>", f"<lastmod>{iso_og_time(now)}</lastmod>", "</url>" ]
     sm.append("</urlset>")
     (SITE_DIR / "sitemap.xml").write_text("\n".join(sm), encoding="utf-8")
 
-    print("[ok] Wrote index, snapshot, archive; re-chained snapshot Forward/Back navigation; sitemap/robots updated.")
+    print("[ok] Wrote index, snapshot, archive (using explicit Top-12 if provided) and re-chained snapshot navigation.")
     return 0
 
 if __name__ == "__main__":
