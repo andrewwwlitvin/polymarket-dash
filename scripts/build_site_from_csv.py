@@ -395,43 +395,69 @@ def methodology_html() -> str:
 """.strip()
 
 # -----------------------
-# Minimal post-build patch to chain snapshot navs (ONLY change added)
+# Minimal post-build patch to chain snapshot navs (robust replacement)
 # -----------------------
-def _rewrite_snapshot_nav_html(html: str, back_href: str, fwd_href: str) -> str:
-    """Update snapshot nav hrefs (header+footer) identified by aria-labels."""
-    def rep_fwd(m):
-        pre, _, post = m.group(1), m.group(2), m.group(3)
-        return f'{pre}href="{escape(fwd_href)}"{post}'
-    def rep_back(m):
-        pre, _, post = m.group(1), m.group(2), m.group(3)
-        return f'{pre}href="{escape(back_href)}"{post}'
-    # Forward
-    html = re.sub(
-        r'(<a\s+class=[\'"]btn[\'"][^>]*\saria-label=[\'"]Forward[\'"][^>]*\s)href=(["\']).*?\2([^>]*>)',
-        rep_fwd, html, flags=re.IGNORECASE
+def _navrow_snapshot_html(back_href: str, fwd_href: str) -> str:
+    """Render the exact snapshot nav row HTML used everywhere."""
+    return (
+        f"<div class='navrow' role='navigation' aria-label='Snapshot navigation'>"
+        f"<a class='btn' href='{escape(fwd_href)}' aria-label='Forward'><span class='ico'>&larr;</span> Forward</a>"
+        f"<span style='flex:1 1 auto'></span>"
+        f"<a class='btn' href='{escape(back_href)}' aria-label='Back'>Back <span class='ico'>&rarr;</span></a>"
+        f"</div>"
     )
-    # Back
-    html = re.sub(
-        r'(<a\s+class=[\'"]btn[\'"][^>]*\saria-label=[\'"]Back[\'"][^>]*\s)href=(["\']).*?\2([^>]*>)',
-        rep_back, html, flags=re.IGNORECASE
+
+def _navrow_footer_snapshot_html(back_href: str, fwd_href: str) -> str:
+    """Footer snapshot nav row block."""
+    return (
+        f"<div class=\"navrow\" role=\"navigation\" aria-label=\"Footer snapshot nav\">"
+        f"<a class=\"btn\" href=\"{escape(fwd_href)}\"><span class=\"ico\">&larr;</span> Forward</a>"
+        f"<span style=\"flex:1 1 auto\"></span>"
+        f"<a class=\"btn\" href=\"{escape(back_href)}\">Back <span class=\"ico\">&rarr;</span></a>"
+        f"</div>"
     )
-    return html
 
 def _rechain_all_snapshots(site_dir: Path) -> None:
-    """Back = previous snapshot or archive.html; Forward = next snapshot or index.html."""
+    """Back = previous snapshot or archive.html; Forward = next snapshot or index.html.
+    Replaces entire header/footer snapshot nav blocks robustly, regardless of old markup details.
+    """
     snaps = sorted(site_dir.glob("dashboard_*.html"), key=lambda p: p.name)
     if not snaps:
         return
+
+    # Pre-compile regex that matches the whole nav block (header + footer variants)
+    # Accept both single and double quotes on attributes; DOTALL to span line breaks
+    header_pat = re.compile(
+        r"<div\s+class=['\"]navrow['\"][^>]*\saria-label=['\"]Snapshot navigation['\"][^>]*>.*?</div>",
+        re.IGNORECASE | re.DOTALL
+    )
+    footer_pat = re.compile(
+        r"<div\s+class=['\"]navrow['\"][^>]*\saria-label=['\"]Footer snapshot nav['\"][^>]*>.*?</div>",
+        re.IGNORECASE | re.DOTALL
+    )
+
     for i, p in enumerate(snaps):
         back_href = snaps[i-1].name if i > 0 else "archive.html"
         fwd_href  = snaps[i+1].name if i < len(snaps)-1 else "index.html"
+
         try:
             html = p.read_text(encoding="utf-8")
-            new_html = _rewrite_snapshot_nav_html(html, back_href, fwd_href)
-            if new_html != html:
-                p.write_text(new_html, encoding="utf-8")
         except Exception:
-            pass
+            continue
+
+        new_html = html
+        # Replace header snapshot nav block if present
+        if header_pat.search(new_html):
+            new_html = header_pat.sub(_navrow_snapshot_html(back_href, fwd_href), new_html)
+        # Replace footer snapshot nav block if present
+        if footer_pat.search(new_html):
+            new_html = footer_pat.sub(_navrow_footer_snapshot_html(back_href, fwd_href), new_html)
+
+        if new_html != html:
+            try:
+                p.write_text(new_html, encoding="utf-8")
+            except Exception:
+                pass
 
 # -----------------------
 # Main build
@@ -638,7 +664,7 @@ def main() -> int:
     ]
     (SITE_DIR / "archive.html").write_text("\n".join(html_arch), encoding="utf-8")
 
-    # ---------- (ONLY CHANGE THAT AFFECTS NAVIGATION) Re-chain all snapshots ----------
+    # ---------- Re-chain ALL existing snapshots (robust block replacement)
     _rechain_all_snapshots(SITE_DIR)
 
     # ---------- robots + sitemap ----------
