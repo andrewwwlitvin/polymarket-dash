@@ -3,19 +3,26 @@ name: Build and publish dashboards
 on:
   workflow_dispatch: {}
   schedule:
-    - cron: "0 */6 * * *"
+    - cron: "0 */6 * * *"   # every 6 hours UTC
+  push:
+    paths:
+      - "scripts/**"
+      - "content/**"
+      - "data/**"
+      - ".github/workflows/build.yml"
 
 jobs:
   build:
     runs-on: ubuntu-latest
     env:
       TZ: Europe/Lisbon
-      REUSE_MINUTES: "0"
       PYTHONUNBUFFERED: "1"
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -25,10 +32,12 @@ jobs:
       - name: Install deps
         run: |
           python -m pip install --upgrade pip
-          pip install -r requirements.txt
+          if [ -f requirements.txt ]; then
+            pip install -r requirements.txt
+          fi
 
-      # -------- Fetch enriched CSV (KNOWN-GOOD) --------
-      - name: Fetch latest markets (fast top-k)
+      # ------------------ FETCH ------------------
+      - name: Fetch latest markets
         id: fetch
         run: |
           set -euo pipefail
@@ -36,88 +45,98 @@ jobs:
           DATA_DIR="$WORKDIR/data"
           mkdir -p "$DATA_DIR"
 
-          echo "[fetch] REUSE_MINUTES=${REUSE_MINUTES}"
-          if [ "${REUSE_MINUTES}" != "0" ]; then
-            recent=$(find "$DATA_DIR" -maxdepth 1 -type f -name 'polymarket_enriched_fast_*.csv' -mmin -"${REUSE_MINUTES}" | sort | tail -n1 || true)
-          else
-            recent=""
+          echo "[fetch] Starting at $(date -u +'%F %T UTC')"
+
+          # Run your fast fetcher (top 120)
+          python -u scripts/polymarket_enriched_fast.py --topk 120 --concurrency 8
+
+          echo "[fetch] Move any produced CSVs into data/"
+          # Move enriched file (wherever it was written) into data/
+          latest_enriched="$(ls -1t $WORKDIR/polymarket_enriched_fast_*.csv $WORKDIR/data/polymarket_enriched_fast_*.csv 2>/dev/null | head -n1 || true)"
+          if [ -n "${latest_enriched:-}" ] && [ -f "$latest_enriched" ]; then
+            base_enriched="$(basename "$latest_enriched")"
+            mv -f "$latest_enriched" "$DATA_DIR/$base_enriched" || true
           fi
 
-          if [ -n "${recent:-}" ]; then
-            echo "[fetch] Reusing CSV (<= ${REUSE_MINUTES} min old): $recent"
-            echo "LATEST_CSV=$recent" >> "$GITHUB_ENV"
-          else
-            echo "[fetch] Fetching a NEW CSV..."
-            python -u "$WORKDIR/scripts/polymarket_enriched_fast.py" --topk 120 --concurrency 8 --fast
-            latest=$(find "$WORKDIR" -maxdepth 2 -type f -name 'polymarket_enriched_fast_*.csv' | sort | tail -n1 || true)
-            if [ -z "${latest:-}" ]; then
-              echo "ERROR: Fetcher did not produce a CSV"; exit 1
-            fi
-            base=$(basename "$latest")
-            mv "$latest" "$DATA_DIR/$base"
-            echo "LATEST_CSV=$DATA_DIR/$base" >> "$GITHUB_ENV"
-            echo "[fetch] New CSV: $DATA_DIR/$base"
+          # Move Top12 selection file, if your fetcher created one
+          latest_top12="$(ls -1t $WORKDIR/polymarket_top12_*.csv $WORKDIR/data/polymarket_top12_*.csv 2>/dev/null | head -n1 || true)"
+          if [ -n "${latest_top12:-}" ] && [ -f "$latest_top12" ]; then
+            base_top12="$(basename "$latest_top12")"
+            mv -f "$latest_top12" "$DATA_DIR/$base_top12" || true
           fi
 
-          echo "[fetch] data/ listing:"
+          echo "[fetch] Final data/ listing:"
           ls -lAh "$DATA_DIR" || true
 
-      # -------- NEW: derive explicit Top-12 file from the enriched CSV --------
-      - name: Derive Top-12 (HOT & OVERLOOKED)
-        run: |
-          set -euo pipefail
-          if [ -z "${LATEST_CSV:-}" ] || [ ! -f "${LATEST_CSV}" ]; then
-            echo "ERROR: LATEST_CSV not set or missing"; exit 1
+          # Export env vars for downstream steps
+          LATEST_CSV="$(ls -1t "$DATA_DIR"/polymarket_enriched_fast_*.csv 2>/dev/null | head -n1 || true)"
+          echo "LATEST_CSV=$LATEST_CSV" >> "$GITHUB_ENV"
+          if [ -n "${latest_top12:-}" ]; then
+            echo "LATEST_TOP12=$DATA_DIR/$base_top12" >> "$GITHUB_ENV"
+          else
+            echo "LATEST_TOP12=" >> "$GITHUB_ENV"
           fi
-          python scripts/derive_top12_from_csv.py "${LATEST_CSV}"
-          # move produced top12 csv into data/ and export env var
-          latest_top=$(ls -1t polymarket_top12_*.csv | head -n1)
-          mv "$latest_top" "data/$latest_top"
-          echo "LATEST_TOP12=$GITHUB_WORKSPACE/data/$latest_top" >> "$GITHUB_ENV"
-          echo "::notice title=Derived Top12::data/$latest_top"
-          ls -lAh data || true
 
-      # -------- Build HTML from CSVs --------
+          echo "::notice title=LATEST_CSV::${LATEST_CSV:-<none>}"
+          echo "::notice title=LATEST_TOP12::${latest_top12:-<none>}"
+
+          # Hard guard – we must have an enriched CSV
+          if [ -z "${LATEST_CSV:-}" ] || [ ! -f "${LATEST_CSV:-/nope}" ]; then
+            echo "ERROR: No enriched CSV found after fetch."
+            exit 1
+          fi
+
+      # ------------------ BUILD ------------------
       - name: Build site
         run: |
           set -euo pipefail
           echo "LATEST_CSV env: ${LATEST_CSV:-<empty>}"
-          echo "LATEST_TOP12 env: ${LATEST_TOP12:-<empty>}"
-          if [ -z "${LATEST_CSV:-}" ] || [ ! -f "${LATEST_CSV}" ]; then
-            echo "ERROR: LATEST_CSV is not set or missing"; exit 1
+          if [ -z "${LATEST_CSV:-}" ] || [ ! -f "$LATEST_CSV" ]; then
+            echo "ERROR: LATEST_CSV is missing or not a file."; exit 1
           fi
 
           echo "Building site from: $LATEST_CSV"
           head -n 2 "$LATEST_CSV" | sed 's/^/[csv head] /' || true
 
-          python "$GITHUB_WORKSPACE/scripts/build_site_from_csv.py" "$LATEST_CSV"
+          # The builder reads LATEST_TOP12 from env if present
+          python scripts/build_site_from_csv.py "$LATEST_CSV"
 
           echo "---- list site/ after build ----"
-          ls -lAh "$GITHUB_WORKSPACE/site" || true
-          if grep -q "sample_enriched_20250101_000000.csv" "$GITHUB_WORKSPACE/site/index.html"; then
-            echo "ERROR: index.html contains sample marker; refusing to publish."; exit 1
+          ls -lAh site || true
+
+          # Guard: refuse to publish sample data
+          if grep -q "sample_enriched_20250101_000000.csv" "site/index.html"; then
+            echo "ERROR: sample marker detected in index.html"; exit 1
           fi
 
-      - name: Commit & push site
+      # ------------------ COMMIT ------------------
+      - name: Commit & push (if changes)
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
           echo "==== git status (before add) ===="
           git status
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git config user.name "github-actions[bot]"
 
-          git add -A site/ data/
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          git add -A site data || true
+
           if git diff --cached --quiet; then
             echo "No changes to commit."
             exit 0
           fi
-          git commit -m "Auto-build site $(date -u +'%Y-%m-%d %H:%M:%S')"
-          git push
 
-      - name: Verify site update
+          # Rebase to avoid non-fast-forward errors, then push
+          git pull --rebase origin main || true
+          git commit -m "Auto-build site $(date -u +'%F %T UTC')"
+          git push origin HEAD:main
+          echo "Pushed site/data updates."
+
+      # ------------------ OUTPUT ------------------
+      - name: Show URLs
+        if: always()
         run: |
-          set -e
-          if git diff --quiet HEAD~1 HEAD -- site/ data/ ; then
-            echo "ERROR: build produced no new changes under site/ or data/."
-            exit 1
-          fi
+          echo "::notice title=Index::https://urbanpoly.com/index.html"
+          echo "::notice title=Archive::https://urbanpoly.com/archive.html"
