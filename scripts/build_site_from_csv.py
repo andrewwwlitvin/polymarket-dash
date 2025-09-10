@@ -420,13 +420,12 @@ def _navrow_footer_snapshot_html(back_href: str, fwd_href: str) -> str:
 def _rechain_all_snapshots(site_dir: Path) -> None:
     """Back = previous snapshot or archive.html; Forward = next snapshot or index.html.
     Replaces entire header/footer snapshot nav blocks robustly, regardless of old markup details.
+    Ensures the penultimate snapshot links forward to index.html (not to the duplicate newest file).
     """
     snaps = sorted(site_dir.glob("dashboard_*.html"), key=lambda p: p.name)
     if not snaps:
         return
 
-    # Pre-compile regex that matches the whole nav block (header + footer variants)
-    # Accept both single and double quotes on attributes; DOTALL to span line breaks
     header_pat = re.compile(
         r"<div\s+class=['\"]navrow['\"][^>]*\saria-label=['\"]Snapshot navigation['\"][^>]*>.*?</div>",
         re.IGNORECASE | re.DOTALL
@@ -438,7 +437,15 @@ def _rechain_all_snapshots(site_dir: Path) -> None:
 
     for i, p in enumerate(snaps):
         back_href = snaps[i-1].name if i > 0 else "archive.html"
-        fwd_href  = snaps[i+1].name if i < len(snaps)-1 else "index.html"
+
+        if i == len(snaps) - 1:
+            # newest snapshot → forward to index
+            fwd_href = "index.html"
+        elif i == len(snaps) - 2:
+            # second-to-last → forward directly to index (skip duplicate newest snapshot)
+            fwd_href = "index.html"
+        else:
+            fwd_href = snaps[i+1].name
 
         try:
             html = p.read_text(encoding="utf-8")
@@ -446,10 +453,8 @@ def _rechain_all_snapshots(site_dir: Path) -> None:
             continue
 
         new_html = html
-        # Replace header snapshot nav block if present
         if header_pat.search(new_html):
             new_html = header_pat.sub(_navrow_snapshot_html(back_href, fwd_href), new_html)
-        # Replace footer snapshot nav block if present
         if footer_pat.search(new_html):
             new_html = footer_pat.sub(_navrow_footer_snapshot_html(back_href, fwd_href), new_html)
 
