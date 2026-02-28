@@ -15,7 +15,6 @@
     "desc_long_0047.html"
   ],
   "recent_meta": [
-    "desc_0001.txt",
     "desc_0080.txt",
     "desc_0022.txt",
     "desc_0056.txt",
@@ -44,10 +43,10 @@
     "desc_0072.txt",
     "desc_0011.txt",
     "desc_0018.txt",
-    "desc_0045.txt"
+    "desc_0045.txt",
+    "desc_0079.txt"
   ],
   "recent_long": [
-    "desc_long_0031.html",
     "desc_long_0026.html",
     "desc_long_0044.html",
     "desc_long_0063.html",
@@ -76,6 +75,7 @@
     "desc_long_0043.html",
     "desc_long_0046.html",
     "desc_long_0070.html",
-    "desc_long_0001.html"
+    "desc_long_0001.html",
+    "desc_long_0020.html"
   ]
 }
