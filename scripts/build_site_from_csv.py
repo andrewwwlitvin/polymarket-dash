@@ -173,7 +173,7 @@ body { margin:0; font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI,
 .stat .lab { display:block; font-weight:700; margin-bottom:4px; font-size:12px; }
 .stat .val { font-size:12px; }
 
-.embed-wrap { width:100%; aspect-ratio: 20/9; background:#0f1120; }
+.embed-wrap { width:100%; height:440px; background:#0f1120; overflow:hidden; }
 .embed { width:100%; height:100%; border:0; }
 .embed-caption { margin: 6px 14px 12px; font-size:12px; color: var(--muted); opacity:.9; }
 .embed-caption a { color: inherit; text-decoration: none; }
@@ -318,10 +318,8 @@ def build_card(row: Dict[str, Any]) -> str:
   <div class="embed-wrap">
     <iframe class="embed" title="{escape(title)}" src="{escape(embed)}" loading="lazy" referrerpolicy="no-referrer-when-downgrade"></iframe>
   </div>
-  <noscript>This market embed requires JavaScript. View it on Polymarket: <a href="{escape(url)}">{escape(url)}</a></noscript>
-  {caption_text(title, url)}
+  <noscript><p style="padding:12px"><a href="{escape(url)}">{escape(title)}</a></p></noscript>
   <div class="card-body">
-    <h3>{escape(title)}</h3>
     <div class="stats">
       <div class="stat"><span class="lab">24h Vol</span><span class="val">{escape(vol24)}</span></div>
       <div class="stat"><span class="lab">Avg Spread</span><span class="val">{escape(str(spread))}</span></div>
