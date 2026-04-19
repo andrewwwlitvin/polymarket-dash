@@ -283,14 +283,36 @@ def page_footer(build_dt: datetime, page_type: str, back_href: Optional[str], fw
 def render_grid(rows: List[Dict[str, Any]]) -> str:
     return "<section class='grid'>" + "\n".join(build_card(r) for r in rows) + "</section>"
 
+def fmt_spread(val) -> str:
+    """Format avgSpread as a readable decimal, e.g. 0.012 → '0.012'"""
+    try:
+        x = float(val) if val not in (None, "", "—") else None
+        if x is None:
+            return "—"
+        return f"{x:.4f}".rstrip("0").rstrip(".")
+    except Exception:
+        return "—"
+
+def fmt_momentum(val) -> str:
+    """Format momentumPct24h as a signed percentage, e.g. 31.8841 → '+31.88%'"""
+    try:
+        x = float(val) if val not in (None, "", "—") else None
+        if x is None:
+            return "—"
+        sign = "+" if x >= 0 else ""
+        return f"{sign}{x:.2f}%"
+    except Exception:
+        return "—"
+
 def build_card(row: Dict[str, Any]) -> str:
     title = row.get("question") or "(Untitled)"
     url = row.get("url") or ""
     embed = row.get("embedSrc") or ""
     vol24 = parse_money(row.get("volume24h"))
-    spread = (row.get("avgSpread") or "—")
+    spread = fmt_spread(row.get("avgSpread"))
     ttr = ttr_from_iso(row.get("endDateISO"))
-    momentum = row.get("momentumPct24h") or row.get("momentumDelta24h") or "—"
+    raw_mom = row.get("momentumPct24h") or row.get("momentumDelta24h")
+    momentum = fmt_momentum(raw_mom)
     return f"""
 <article class="card">
   <div class="embed-wrap">
