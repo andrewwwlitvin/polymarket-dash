@@ -46,13 +46,12 @@ OUT_CSV_TOPS = f"polymarket_top12_{TS}.csv"
 GAMMA_MARKETS = "https://gamma-api.polymarket.com/markets"
 DATA_TRADES = "https://data-api.polymarket.com/trades"
 
-# Quotes: try ID-based first (more likely to match), then slug-based fallbacks
-PLANB_ID_FIRST = [
-    "https://clob.polymarket.com/markets/{id}/summary",
-    "https://clob.polymarket.com/markets/{id}/orderbook",
-    "https://clob.polymarket.com/markets/{id}",
-    "https://clob.polymarket.com/market?market_id={id}",
-    "https://gamma-api.polymarket.com/markets/{id}",
+# Quotes: try conditionId (0x hash) first — that's what CLOB API requires.
+# {cid} = conditionId (0x hex), {id} = numeric Gamma id, {slug} = slug
+PLANB_CID_FIRST = [
+    "https://clob.polymarket.com/markets/{cid}",
+    "https://clob.polymarket.com/markets/{cid}/summary",
+    "https://clob.polymarket.com/markets/{cid}/orderbook",
 ]
 
 PLANB_SLUG_FALLBACK = [
@@ -235,20 +234,55 @@ def fetch_gamma_open_markets():
     print(f"  Got {len(out)} markets")
     return out
 
-def fetch_quotes_resilient(market_id: str, slug: str | None = None):
+def gamma_quotes_from_market(m):
     """
-    Try several endpoints by market_id first; if that fails, try by slug.
+    Extract YES/NO quotes from Gamma market outcomePrices/outcomes.
+    Gamma returns midpoint prices; we approximate a small spread around them.
+    Returns list of quote dicts, or [] if data is absent/malformed.
+    """
+    outcomes_raw = m.get("outcomes")
+    prices_raw = m.get("outcomePrices")
+    if not outcomes_raw or not prices_raw:
+        return []
+    try:
+        outcomes = json.loads(outcomes_raw) if isinstance(outcomes_raw, str) else outcomes_raw
+        prices = json.loads(prices_raw) if isinstance(prices_raw, str) else prices_raw
+    except Exception:
+        return []
+    if not isinstance(outcomes, list) or not isinstance(prices, list):
+        return []
+
+    # Try to get spread from Gamma's spreadClob / spread field
+    spread_raw = m.get("spreadClob") or m.get("spread")
+    half = _f(spread_raw)
+    half = (half / 2.0) if (isinstance(half, float) and half > 0) else 0.005
+
+    quotes = []
+    for name, price in zip(outcomes, prices):
+        p = _f(price)
+        if p is None:
+            continue
+        bid = max(0.0, round(p - half, 6))
+        ask = min(1.0, round(p + half, 6))
+        quotes.append({"name": str(name), "bestBid": bid, "bestAsk": ask})
+    return quotes
+
+
+def fetch_quotes_resilient(condition_id: str, slug: str | None = None):
+    """
+    Try CLOB endpoints using conditionId (0x hash) first, then slug fallbacks.
     Returns (quotes, source_url_or_none).
     """
-    for tpl in PLANB_ID_FIRST:
-        url = tpl.format(id=market_id)
-        try:
-            data = http_get_json(url)
-            q = outcome_quotes_from_obj(data)
-            if q:
-                return q, url
-        except Exception:
-            time.sleep(0.05)
+    if condition_id:
+        for tpl in PLANB_CID_FIRST:
+            url = tpl.format(cid=condition_id)
+            try:
+                data = http_get_json(url)
+                q = outcome_quotes_from_obj(data)
+                if q:
+                    return q, url
+            except Exception:
+                time.sleep(0.05)
 
     if slug:
         for tpl in PLANB_SLUG_FALLBACK:
@@ -267,12 +301,18 @@ def fetch_quotes_resilient(market_id: str, slug: str | None = None):
 
     return [], None
 
-def fetch_trades_24h(market_id):
+def fetch_trades_24h(condition_id: str):
     """
-    Pull up to ~5000 trades in the last 24h (paged), best effort.
+    Pull up to ~2000 trades in the last 24h for a specific market using conditionId.
+    The data API requires `conditionId` (0x hex hash), not the numeric Gamma id.
     Returns dict with: volume24h, trades24h, uniqueTraders24h, momentumDelta24h, momentumPct24h,
     and min/max trade price (for proxy spread fallback).
     """
+    if not condition_id:
+        return {"volume24h": 0.0, "trades24h": 0, "uniqueTraders24h": 0,
+                "momentumDelta24h": None, "momentumPct24h": None,
+                "minTradePrice24h": None, "maxTradePrice24h": None}
+
     start_iso = (datetime.now(timezone.utc) - timedelta(days=1)).isoformat()
     total_trades = 0
     total_volume = 0.0
@@ -284,8 +324,9 @@ def fetch_trades_24h(market_id):
 
     limit = 1000
     page = 0
-    while page < 5:
-        params = {"market_id": market_id, "start": start_iso, "limit": str(limit)}
+    while page < 2:  # cap at 2000 trades; if we hit this, data is unreliable anyway
+        # conditionId is the correct filter parameter for data-api.polymarket.com/trades
+        params = {"conditionId": condition_id, "start": start_iso, "limit": str(limit)}
         try:
             arr = http_get_json(DATA_TRADES, params=params)
         except Exception:
@@ -351,17 +392,33 @@ def fast_enrich(top_markets, concurrency, use_proxy_spread=True):
     lock = threading.Lock()
 
     def task(m):
-        mid = str(m.get("id") or m.get("_id") or m.get("slug") or "")
-        s = m.get("slug") or ""
-        # pass 1
-        quotes, quote_src = fetch_quotes_resilient(mid, s) if mid else ([], None)
-        # pass 2 (thin books can blink)
+        gamma_id = str(m.get("id") or m.get("_id") or "")
+        # conditionId is the 0x hex hash required by CLOB & data APIs
+        condition_id = str(m.get("conditionId") or "")
+        slug = m.get("slug") or ""
+
+        # pass 1: fetch quotes via CLOB using conditionId
+        quotes, quote_src = fetch_quotes_resilient(condition_id, slug)
+        # pass 2: retry once (thin books can blink)
         if not quotes:
-            time.sleep(0.6)
-            quotes, quote_src = fetch_quotes_resilient(mid, s) if mid else ([], None)
-        stats24 = fetch_trades_24h(mid) if mid else {}
+            time.sleep(0.4)
+            quotes, quote_src = fetch_quotes_resilient(condition_id, slug)
+        # pass 3: fall back to Gamma outcomePrices (always available, no extra API call)
+        if not quotes:
+            quotes = gamma_quotes_from_market(m)
+            quote_src = "gamma_outcome_prices" if quotes else None
+
+        # fetch 24h trades using conditionId (correct filter param)
+        stats24 = fetch_trades_24h(condition_id) if condition_id else {}
+
+        # supplement: if trades API returned 0 volume, use Gamma's volume24hr directly
+        if not stats24.get("volume24h"):
+            gamma_vol24 = _f(m.get("volume24hr") or m.get("volume24hrClob") or m.get("oneDayVolume"))
+            if gamma_vol24 is not None:
+                stats24["volume24h"] = round(gamma_vol24, 6)
+
         with lock:
-            results[mid] = {"quotes": quotes, "stats24": stats24, "quoteSource": quote_src}
+            results[gamma_id] = {"quotes": quotes, "stats24": stats24, "quoteSource": quote_src}
 
     with ThreadPoolExecutor(max_workers=concurrency) as ex:
         futures = [ex.submit(task, m) for m in top_markets]
@@ -371,7 +428,8 @@ def fast_enrich(top_markets, concurrency, use_proxy_spread=True):
     print("[3/4] Computing features…")
     enriched = []
     for m in top_markets:
-        mid = str(m.get("id") or m.get("_id") or m.get("slug") or "")
+        gamma_id = str(m.get("id") or m.get("_id") or "")
+        condition_id = str(m.get("conditionId") or "")
         slug = m.get("slug") or ""
         url = f"https://polymarket.com/event/{slug}" if slug else ""
         embedSrc = f"https://embed.polymarket.com/market.html?market={slug}&features=volume&theme=light" if slug else ""
@@ -380,7 +438,7 @@ def fast_enrich(top_markets, concurrency, use_proxy_spread=True):
         category = m.get("category") or ""
         vol_lifetime = _f(m.get("volumeNum") if m.get("volumeNum") is not None else m.get("volume"))
         end_dt = parse_dt(m.get("endDate") or m.get("endDateIso"))
-        bundle = results.get(mid) or {}
+        bundle = results.get(gamma_id) or {}
         quotes = bundle.get("quotes") or []
         stats24 = bundle.get("stats24") or {}
 
@@ -420,7 +478,8 @@ def fast_enrich(top_markets, concurrency, use_proxy_spread=True):
         why = " • ".join(why_bits) if why_bits else ""
 
         enriched.append({
-            "id": mid,
+            "id": gamma_id,
+            "conditionId": condition_id,
             "slug": slug,
             "url": url,
             "embedSrc": embedSrc,
@@ -503,7 +562,7 @@ def main():
     enriched = fast_enrich(topk, concurrency=args.concurrency, use_proxy_spread=not args.no_proxy_spread)
 
     # Write full list (dashboard-friendly fields included)
-    fields = ["id","slug","url","embedSrc","question","category","why",
+    fields = ["id","conditionId","slug","url","embedSrc","question","category","why",
               "volume","volume24h","trades24h","uniqueTraders24h",
               "momentumDelta24h","momentumPct24h",
               "endDateISO","timeToResolveDays","outcomeCount","avgSpread","underround",
@@ -533,7 +592,7 @@ def main():
     for r in gems: print(fmt(r))
 
     # Write combined Top12 CSV (two buckets; include bestQuotesJSON + proxy field for debugging)
-    top_fields = ["list","rank","id","slug","url","embedSrc","question","category",
+    top_fields = ["list","rank","id","conditionId","slug","url","embedSrc","question","category",
                   "why","volume24h","volume","avgSpread","underround",
                   "near50Flag","timeToResolveDays","outcomeCount","momentumPct24h","endDateISO",
                   "bestQuotesJSON","avgSpreadProxy"]
@@ -542,7 +601,8 @@ def main():
         w.writeheader()
         for i, r in enumerate(hot, start=1):
             w.writerow({
-                "list":"HOT","rank":i,"id":r["id"],"slug":r.get("slug"),"url":r.get("url"),"embedSrc":r.get("embedSrc"),
+                "list":"HOT","rank":i,"id":r["id"],"conditionId":r.get("conditionId"),
+                "slug":r.get("slug"),"url":r.get("url"),"embedSrc":r.get("embedSrc"),
                 "question":r["question"],"category":r["category"],"why":r.get("why"),
                 "volume24h":r.get("volume24h"),"volume":r.get("volume"),
                 "avgSpread":r.get("avgSpread"),"underround":r.get("underround"),
@@ -553,7 +613,8 @@ def main():
             })
         for i, r in enumerate(gems, start=1):
             w.writerow({
-                "list":"HIDDEN_GEMS","rank":i,"id":r["id"],"slug":r.get("slug"),"url":r.get("url"),"embedSrc":r.get("embedSrc"),
+                "list":"HIDDEN_GEMS","rank":i,"id":r["id"],"conditionId":r.get("conditionId"),
+                "slug":r.get("slug"),"url":r.get("url"),"embedSrc":r.get("embedSrc"),
                 "question":r["question"],"category":r["category"],"why":r.get("why"),
                 "volume24h":r.get("volume24h"),"volume":r.get("volume"),
                 "avgSpread":r.get("avgSpread"),"underround":r.get("underround"),
