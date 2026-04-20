@@ -173,7 +173,7 @@ body { margin:0; font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI,
 .stat .lab { display:block; font-weight:700; margin-bottom:4px; font-size:12px; }
 .stat .val { font-size:12px; }
 
-.embed-wrap { width:100%; height:440px; background:#0f1120; overflow:hidden; }
+.embed-wrap { width:100%; height:375px; background:#0f1120; overflow:hidden; }
 .embed { width:100%; height:100%; border:0; }
 .embed-caption { margin: 6px 14px 12px; font-size:12px; color: var(--muted); opacity:.9; }
 .embed-caption a { color: inherit; text-decoration: none; }
