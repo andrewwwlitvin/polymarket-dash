@@ -22,7 +22,7 @@ No third-party dependencies (urllib, csv, json, etc).
 """
 
 import csv, json, time, urllib.parse, urllib.request, argparse, math, threading
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timezone
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 # --- Settings (can be overridden via CLI) ---
@@ -44,7 +44,6 @@ OUT_CSV_TOPS = f"polymarket_top12_{TS}.csv"
 
 # --- Endpoints ---
 GAMMA_MARKETS = "https://gamma-api.polymarket.com/markets"
-DATA_TRADES = "https://data-api.polymarket.com/trades"
 
 # Quotes: try conditionId (0x hash) first — that's what CLOB API requires.
 # {cid} = conditionId (0x hex), {id} = numeric Gamma id, {slug} = slug
@@ -225,7 +224,7 @@ def fetch_gamma_open_markets():
     print("[1/4] Fetching open markets from Gamma…")
     out, offset = [], 0
     while True:
-        params = {"closed":"false","limit":PAGE_SIZE,"offset":offset,"order":"volumeNum","ascending":"false"}
+        params = {"closed":"false","active":"true","limit":PAGE_SIZE,"offset":offset,"order":"volumeNum","ascending":"false"}
         batch = http_get_json(GAMMA_MARKETS, params=params)
         if not batch: break
         out.extend(batch)
@@ -301,75 +300,28 @@ def fetch_quotes_resilient(condition_id: str, slug: str | None = None):
 
     return [], None
 
-def fetch_trades_24h(condition_id: str):
+def fetch_momentum_clob(condition_id: str):
     """
-    Pull up to ~2000 trades in the last 24h for a specific market using conditionId.
-    The data API requires `conditionId` (0x hex hash), not the numeric Gamma id.
-    Returns dict with: volume24h, trades24h, uniqueTraders24h, momentumDelta24h, momentumPct24h,
-    and min/max trade price (for proxy spread fallback).
+    Fetch 24h price momentum from CLOB prices-history endpoint (no auth required).
+    Returns (momentumDelta24h, momentumPct24h) or (None, None) on failure.
     """
     if not condition_id:
-        return {"volume24h": 0.0, "trades24h": 0, "uniqueTraders24h": 0,
-                "momentumDelta24h": None, "momentumPct24h": None,
-                "minTradePrice24h": None, "maxTradePrice24h": None}
-
-    start_iso = (datetime.now(timezone.utc) - timedelta(days=1)).isoformat()
-    total_trades = 0
-    total_volume = 0.0
-    first_price = None
-    last_price = None
-    min_price = None
-    max_price = None
-    traders = set()
-
-    limit = 1000
-    page = 0
-    while page < 2:  # cap at 2000 trades; if we hit this, data is unreliable anyway
-        # conditionId is the correct filter parameter for data-api.polymarket.com/trades
-        params = {"conditionId": condition_id, "start": start_iso, "limit": str(limit)}
-        try:
-            arr = http_get_json(DATA_TRADES, params=params)
-        except Exception:
-            break
-        if not isinstance(arr, list) or not arr:
-            break
-
-        for t in arr:
-            sz = _f(t.get("size") or t.get("amount") or t.get("qty"))
-            px = _f(t.get("price") or t.get("fill_price") or t.get("avg_price"))
-            who = t.get("trader") or t.get("taker") or t.get("maker")
-            if isinstance(who, str) and who:
-                traders.add(who)
-            if isinstance(sz, float):
-                total_volume += sz
-            if isinstance(px, float):
-                if first_price is None:
-                    first_price = px
-                last_price = px
-                min_price = px if min_price is None else min(min_price, px)
-                max_price = px if max_price is None else max(max_price, px)
-            total_trades += 1
-
-        if len(arr) < limit:
-            break
-        page += 1
-        time.sleep(0.03)
-
-    delta = None
-    pct = None
-    if first_price is not None and last_price is not None:
-        delta = last_price - first_price
-        pct = (delta / first_price * 100.0) if first_price else None
-
-    return {
-        "volume24h": round(total_volume, 6) if total_volume else 0.0,
-        "trades24h": total_trades,
-        "uniqueTraders24h": len(traders),
-        "momentumDelta24h": round(delta, 6) if delta is not None else None,
-        "momentumPct24h": round(pct, 4) if pct is not None else None,
-        "minTradePrice24h": min_price,
-        "maxTradePrice24h": max_price,
-    }
+        return None, None
+    try:
+        url = (f"https://clob.polymarket.com/prices-history"
+               f"?market={urllib.parse.quote(condition_id)}&fidelity=60&interval=1d")
+        data = http_get_json(url, retries=2, timeout=12)
+        history = data.get("history") or []
+        if len(history) >= 2:
+            first_p = _f((history[0].get("p") if isinstance(history[0], dict) else None))
+            last_p  = _f((history[-1].get("p") if isinstance(history[-1], dict) else None))
+            if first_p and last_p and first_p > 0:
+                delta = last_p - first_p
+                pct   = delta / first_p * 100.0
+                return round(delta, 6), round(pct, 4)
+    except Exception:
+        pass
+    return None, None
 
 # --- Pre-score (no book) to pick TOP-K ---
 def prelim_score(m):
@@ -379,10 +331,12 @@ def prelim_score(m):
 
     end_dt = parse_dt(m.get("endDate") or m.get("endDateIso"))
     ttr_days = days_to_resolve(end_dt)
+    # Hard-exclude markets that have already ended/resolved
+    if ttr_days is not None and ttr_days <= 0:
+        return 0.0
     ttr_factor = 0.0
     if ttr_days is not None:
-        if ttr_days <= 0: ttr_factor = 0.2
-        else: ttr_factor = max(0.0, 1.0/(1.0 + ttr_days/30.0))
+        ttr_factor = max(0.0, 1.0/(1.0 + ttr_days/30.0))
     return math.log1p(max(vol,0.0)) * 1.0 + ttr_factor * 2.0
 
 # --- FAST enrichment path (quotes + 24h trades) ---
@@ -393,32 +347,39 @@ def fast_enrich(top_markets, concurrency, use_proxy_spread=True):
 
     def task(m):
         gamma_id = str(m.get("id") or m.get("_id") or "")
-        # conditionId is the 0x hex hash required by CLOB & data APIs
         condition_id = str(m.get("conditionId") or "")
         slug = m.get("slug") or ""
 
-        # pass 1: fetch quotes via CLOB using conditionId
+        # Skip already-ended markets (safety net on top of prelim_score filter)
+        end_dt = parse_dt(m.get("endDate") or m.get("endDateIso"))
+        if end_dt:
+            ttr = days_to_resolve(end_dt)
+            if ttr is not None and ttr <= 0:
+                with lock:
+                    results[gamma_id] = {"quotes": [], "vol24h": None,
+                                         "momentumDelta": None, "momentumPct": None,
+                                         "quoteSource": None}
+                return
+
+        # Quotes: CLOB conditionId → slug fallback → Gamma outcomePrices
         quotes, quote_src = fetch_quotes_resilient(condition_id, slug)
-        # pass 2: retry once (thin books can blink)
         if not quotes:
             time.sleep(0.4)
             quotes, quote_src = fetch_quotes_resilient(condition_id, slug)
-        # pass 3: fall back to Gamma outcomePrices (always available, no extra API call)
         if not quotes:
             quotes = gamma_quotes_from_market(m)
             quote_src = "gamma_outcome_prices" if quotes else None
 
-        # fetch 24h trades using conditionId (correct filter param)
-        stats24 = fetch_trades_24h(condition_id) if condition_id else {}
+        # Volume: use Gamma's pre-computed per-market 24h volume (reliable, no extra call)
+        vol24h = _f(m.get("volume24hr") or m.get("volume24hrClob") or m.get("oneDayVolume"))
 
-        # supplement: if trades API returned 0 volume, use Gamma's volume24hr directly
-        if not stats24.get("volume24h"):
-            gamma_vol24 = _f(m.get("volume24hr") or m.get("volume24hrClob") or m.get("oneDayVolume"))
-            if gamma_vol24 is not None:
-                stats24["volume24h"] = round(gamma_vol24, 6)
+        # Momentum: 24h price change from CLOB prices-history (no auth needed)
+        mom_delta, mom_pct = fetch_momentum_clob(condition_id) if condition_id else (None, None)
 
         with lock:
-            results[gamma_id] = {"quotes": quotes, "stats24": stats24, "quoteSource": quote_src}
+            results[gamma_id] = {"quotes": quotes, "vol24h": vol24h,
+                                  "momentumDelta": mom_delta, "momentumPct": mom_pct,
+                                  "quoteSource": quote_src}
 
     with ThreadPoolExecutor(max_workers=concurrency) as ex:
         futures = [ex.submit(task, m) for m in top_markets]
@@ -438,20 +399,20 @@ def fast_enrich(top_markets, concurrency, use_proxy_spread=True):
         category = m.get("category") or ""
         vol_lifetime = _f(m.get("volumeNum") if m.get("volumeNum") is not None else m.get("volume"))
         end_dt = parse_dt(m.get("endDate") or m.get("endDateIso"))
+        ttr_val = days_to_resolve(end_dt)
+
+        # Skip ended markets in output too
+        if ttr_val is not None and ttr_val <= 0:
+            continue
+
         bundle = results.get(gamma_id) or {}
         quotes = bundle.get("quotes") or []
-        stats24 = bundle.get("stats24") or {}
+        vol24h = bundle.get("vol24h")          # from Gamma volume24hr (per-market, reliable)
+        mom_delta = bundle.get("momentumDelta") # from CLOB prices-history
+        mom_pct   = bundle.get("momentumPct")
 
         avg_spread = compute_spread_avg(quotes)
         under = compute_underround(quotes)
-
-        # Optional proxy spread from trades high/low
-        proxy_spread = None
-        mn = stats24.get("minTradePrice24h")
-        mx = stats24.get("maxTradePrice24h")
-        if avg_spread is None and use_proxy_spread and isinstance(mn, (int,float)) and isinstance(mx, (int,float)) and mx >= mn:
-            proxy_spread = mx - mn
-            avg_spread = proxy_spread  # fill as fallback
 
         binary_mid_yes = None
         if quotes and is_binary(quotes):
@@ -463,12 +424,10 @@ def fast_enrich(top_markets, concurrency, use_proxy_spread=True):
             if tgt and tgt.get("bestBid") is not None and tgt.get("bestAsk") is not None:
                 binary_mid_yes = midpoint(tgt["bestBid"], tgt["bestAsk"])
 
-        # One-liner reason
-        ttr_days = round(days_to_resolve(end_dt), 1) if end_dt else None
+        ttr_days = round(ttr_val, 1) if ttr_val is not None else None
         why_bits = []
-        v24 = stats24.get("volume24h")
-        if isinstance(v24, (int, float)) and v24 > 0:
-            why_bits.append(f"24h ${int(v24):,}")
+        if isinstance(vol24h, (int, float)) and vol24h > 0:
+            why_bits.append(f"24h ${int(vol24h):,}")
         if avg_spread is not None:
             why_bits.append(f"spread {avg_spread:.3f}")
         if ttr_days is not None:
@@ -488,21 +447,18 @@ def fast_enrich(top_markets, concurrency, use_proxy_spread=True):
             "why": why,
 
             "volume": vol_lifetime,
-            "volume24h": stats24.get("volume24h"),
-            "trades24h": stats24.get("trades24h"),
-            "uniqueTraders24h": stats24.get("uniqueTraders24h"),
-            "momentumDelta24h": stats24.get("momentumDelta24h"),
-            "momentumPct24h": stats24.get("momentumPct24h"),
+            "volume24h": round(vol24h, 2) if isinstance(vol24h, float) else vol24h,
+            "momentumDelta24h": mom_delta,
+            "momentumPct24h": mom_pct,
 
             "endDateISO": end_dt.isoformat() if end_dt else "",
-            "timeToResolveDays": round(days_to_resolve(end_dt),3) if end_dt else None,
+            "timeToResolveDays": round(ttr_val, 3) if ttr_val is not None else None,
             "outcomeCount": len(quotes),
             "avgSpread": round(avg_spread,6) if avg_spread is not None else None,
             "underround": round(under,6) if under is not None else None,
             "binaryMidYes": round(binary_mid_yes,6) if binary_mid_yes is not None else None,
             "near50Flag": 1 if (binary_mid_yes is not None and 0.40 <= binary_mid_yes <= 0.60) else 0,
             "bestQuotesJSON": json.dumps(quotes, ensure_ascii=False) if quotes else "",
-            "avgSpreadProxy": round(proxy_spread,6) if proxy_spread is not None else None,
         })
     print("[4/4] Done.")
     return enriched
@@ -563,10 +519,9 @@ def main():
 
     # Write full list (dashboard-friendly fields included)
     fields = ["id","conditionId","slug","url","embedSrc","question","category","why",
-              "volume","volume24h","trades24h","uniqueTraders24h",
-              "momentumDelta24h","momentumPct24h",
+              "volume","volume24h","momentumDelta24h","momentumPct24h",
               "endDateISO","timeToResolveDays","outcomeCount","avgSpread","underround",
-              "binaryMidYes","near50Flag","bestQuotesJSON","avgSpreadProxy"]
+              "binaryMidYes","near50Flag","bestQuotesJSON"]
     with open(OUT_CSV_FULL, "w", newline="", encoding="utf-8") as f:
         w = csv.DictWriter(f, fieldnames=fields)
         w.writeheader()
@@ -595,7 +550,7 @@ def main():
     top_fields = ["list","rank","id","conditionId","slug","url","embedSrc","question","category",
                   "why","volume24h","volume","avgSpread","underround",
                   "near50Flag","timeToResolveDays","outcomeCount","momentumPct24h","endDateISO",
-                  "bestQuotesJSON","avgSpreadProxy"]
+                  "bestQuotesJSON"]
     with open(OUT_CSV_TOPS, "w", newline="", encoding="utf-8") as f:
         w = csv.DictWriter(f, fieldnames=top_fields)
         w.writeheader()
@@ -608,8 +563,7 @@ def main():
                 "avgSpread":r.get("avgSpread"),"underround":r.get("underround"),
                 "near50Flag":r.get("near50Flag"),"timeToResolveDays":r.get("timeToResolveDays"),
                 "outcomeCount":r.get("outcomeCount"),"momentumPct24h":r.get("momentumPct24h"),
-                "endDateISO":r.get("endDateISO"), "bestQuotesJSON": r.get("bestQuotesJSON"),
-                "avgSpreadProxy": r.get("avgSpreadProxy"),
+                "endDateISO":r.get("endDateISO"),"bestQuotesJSON":r.get("bestQuotesJSON"),
             })
         for i, r in enumerate(gems, start=1):
             w.writerow({
@@ -620,8 +574,7 @@ def main():
                 "avgSpread":r.get("avgSpread"),"underround":r.get("underround"),
                 "near50Flag":r.get("near50Flag"),"timeToResolveDays":r.get("timeToResolveDays"),
                 "outcomeCount":r.get("outcomeCount"),"momentumPct24h":r.get("momentumPct24h"),
-                "endDateISO":r.get("endDateISO"), "bestQuotesJSON": r.get("bestQuotesJSON"),
-                "avgSpreadProxy": r.get("avgSpreadProxy"),
+                "endDateISO":r.get("endDateISO"),"bestQuotesJSON":r.get("bestQuotesJSON"),
             })
     print(f"[ok] Wrote {OUT_CSV_TOPS} (HOT + HIDDEN_GEMS)")
 
