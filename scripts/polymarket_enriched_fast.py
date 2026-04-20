@@ -300,16 +300,17 @@ def fetch_quotes_resilient(condition_id: str, slug: str | None = None):
 
     return [], None
 
-def fetch_momentum_clob(condition_id: str):
+def fetch_momentum_clob(token_id: str):
     """
     Fetch 24h price momentum from CLOB prices-history endpoint (no auth required).
+    Accepts a YES token ID from clobTokenIds (preferred) or a conditionId as fallback.
     Returns (momentumDelta24h, momentumPct24h) or (None, None) on failure.
     """
-    if not condition_id:
+    if not token_id:
         return None, None
     try:
         url = (f"https://clob.polymarket.com/prices-history"
-               f"?market={urllib.parse.quote(condition_id)}&fidelity=60&interval=1d")
+               f"?market={urllib.parse.quote(token_id)}&fidelity=60&interval=1d")
         data = http_get_json(url, retries=2, timeout=12)
         history = data.get("history") or []
         if len(history) >= 2:
@@ -373,8 +374,17 @@ def fast_enrich(top_markets, concurrency, use_proxy_spread=True):
         # Volume: use Gamma's pre-computed per-market 24h volume (reliable, no extra call)
         vol24h = _f(m.get("volume24hr") or m.get("volume24hrClob") or m.get("oneDayVolume"))
 
-        # Momentum: 24h price change from CLOB prices-history (no auth needed)
-        mom_delta, mom_pct = fetch_momentum_clob(condition_id) if condition_id else (None, None)
+        # Momentum: 24h price change via CLOB prices-history using YES token ID.
+        # clobTokenIds is a JSON string like '["44311756...","76961712..."]' where
+        # index 0 = YES token, index 1 = NO token. Token IDs are required by CLOB;
+        # conditionId (0x hex) does NOT work for this endpoint.
+        clob_token_ids = []
+        try:
+            clob_token_ids = json.loads(m.get("clobTokenIds") or "[]")
+        except Exception:
+            pass
+        yes_token = str(clob_token_ids[0]) if clob_token_ids else None
+        mom_delta, mom_pct = fetch_momentum_clob(yes_token) if yes_token else (None, None)
 
         with lock:
             results[gamma_id] = {"quotes": quotes, "vol24h": vol24h,
@@ -466,14 +476,19 @@ def fast_enrich(top_markets, concurrency, use_proxy_spread=True):
 # --- Ranking to produce Top 12 + Top 12 ---
 def rank_hot(rows):
     # Prefer 24h volume; fallback to lifetime. Reward tight spreads & time proximity.
+    # Hard-penalise markets more than 365 days away — they shouldn't appear in HOT.
     def key(r):
         vol24 = r.get("volume24h")
         volL  = r.get("volume") or 0.0
         vol = vol24 if isinstance(vol24,(int,float)) and vol24 else volL
         spread = r.get("avgSpread")
         ttr = r.get("timeToResolveDays")
+        # Hard penalty: markets more than 365 days away get a near-zero TTR component
+        if ttr is not None and ttr > 365:
+            ttr_component = 0.01
+        else:
+            ttr_component = (1.0/(1.0+(ttr or 365)/30.0))
         spread_component = (1.0/(1.0+spread*100)) if (isinstance(spread,(int,float)) and spread is not None and spread>=0) else 0.5
-        ttr_component = (1.0/(1.0+(ttr or 365)/30.0))
         return (math.log1p(vol)*1.3) + (spread_component*2.0) + (ttr_component*1.2)
     return sorted(rows, key=key, reverse=True)[:12]
 
