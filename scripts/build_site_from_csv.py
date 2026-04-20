@@ -339,13 +339,13 @@ def page_head(title: str, description: str, canonical: str, og_updated: datetime
         keywords = "polymarket snapshot, prediction markets snapshot, polymarket odds, election odds, dashboard"
 
     ver = og_updated.strftime("%Y%m%d%H%M")
-    og_img = f"https://urbanpoly.com/og-preview.png?v={ver}"
+    og_img = f"https://www.urbanpoly.com/og-preview.png?v={ver}"
 
     website_ld = {
         "@context": "https://schema.org",
         "@type": "WebSite",
-        "@id": "https://urbanpoly.com/#website",
-        "url": "https://urbanpoly.com/",
+        "@id": "https://www.urbanpoly.com/#website",
+        "url": "https://www.urbanpoly.com/",
         "name": "UrbanPoly — Polymarket Dashboard",
         "description": "Automated Polymarket dashboard highlighting hottest and overlooked markets, refreshed ~6h."
     }
@@ -358,7 +358,7 @@ def page_head(title: str, description: str, canonical: str, og_updated: datetime
         "description": description,
         "dateModified": iso_og_time(og_updated)
     }
-    if canonical.startswith("https://urbanpoly.com/dashboard_"):
+    if canonical.startswith("https://www.urbanpoly.com/dashboard_"):
         webpage_ld["datePublished"] = iso_og_time(og_updated)
 
     json_ld = json.dumps(website_ld, separators=(",", ":")) + "\n" + json.dumps(webpage_ld, separators=(",", ":"))
@@ -562,7 +562,7 @@ def main() -> int:
     head = page_head(
         title=f"Hottest Markets & Overlooked Chances on Polymarket Today — {human}",
         description=short_desc[:160],
-        canonical="https://urbanpoly.com/index.html",
+        canonical="https://www.urbanpoly.com/index.html",
         og_updated=now,
     )
     top_nav = build_nav_top("index")
@@ -603,7 +603,7 @@ def main() -> int:
     head_snap = page_head(
         title=f"Hottest Markets & Overlooked Chances on Polymarket — {human}",
         description=short_desc[:160],
-        canonical=f"https://urbanpoly.com/{snap_name}",
+        canonical=f"https://www.urbanpoly.com/{snap_name}",
         og_updated=now,
     )
     top_nav_snap = build_nav_top("snapshot")
@@ -643,7 +643,7 @@ def main() -> int:
     head_arch = page_head(
         title="Polymarket Dashboards — Archive",
         description=short_desc[:160],
-        canonical="https://urbanpoly.com/archive.html",
+        canonical="https://www.urbanpoly.com/archive.html",
         og_updated=now,
     )
     snaps_after = sorted(SITE_DIR.glob("dashboard_*.html"), key=lambda p: p.stat().st_mtime, reverse=True)
@@ -693,11 +693,37 @@ def main() -> int:
     _rechain_all_snapshots(SITE_DIR)
 
     # ---------- robots + sitemap ----------
-    (SITE_DIR / "robots.txt").write_text("User-agent: *\nAllow: /\nSitemap: https://urbanpoly.com/sitemap.xml\n", encoding="utf-8")
-    urls = ["index.html", "archive.html"] + [p.name for p in snaps_after]
+    (SITE_DIR / "robots.txt").write_text("User-agent: *\nAllow: /\nSitemap: https://www.urbanpoly.com/sitemap.xml\n", encoding="utf-8")
     sm = ['<?xml version="1.0" encoding="UTF-8"?>','<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">']
-    for u in urls:
-        sm += [ "<url>", f"<loc>https://urbanpoly.com/{u}</loc>", f"<lastmod>{iso_og_time(now)}</lastmod>", "</url>" ]
+    # Index — refreshes every ~6h, highest priority
+    sm += ["<url>",
+           "<loc>https://www.urbanpoly.com/index.html</loc>",
+           f"<lastmod>{iso_og_time(now)}</lastmod>",
+           "<changefreq>hourly</changefreq>",
+           "<priority>1.0</priority>",
+           "</url>"]
+    # Archive — updated on every build
+    sm += ["<url>",
+           "<loc>https://www.urbanpoly.com/archive.html</loc>",
+           f"<lastmod>{iso_og_time(now)}</lastmod>",
+           "<changefreq>daily</changefreq>",
+           "<priority>0.6</priority>",
+           "</url>"]
+    # Snapshots — frozen pages; cap at 30 most recent to avoid sitemap bloat
+    for snap in list(snaps_after)[-30:]:
+        # derive lastmod from filename timestamp (dashboard_YYYY-MM-DD_HHMM.html)
+        try:
+            dt_str = snap.stem.replace("dashboard_", "")  # "2026-04-20_2047"
+            snap_dt = datetime.strptime(dt_str, "%Y-%m-%d_%H%M").replace(tzinfo=timezone.utc)
+            snap_lastmod = iso_og_time(snap_dt)
+        except Exception:
+            snap_lastmod = iso_og_time(now)
+        sm += ["<url>",
+               f"<loc>https://www.urbanpoly.com/{snap.name}</loc>",
+               f"<lastmod>{snap_lastmod}</lastmod>",
+               "<changefreq>never</changefreq>",
+               "<priority>0.4</priority>",
+               "</url>"]
     sm.append("</urlset>")
     (SITE_DIR / "sitemap.xml").write_text("\n".join(sm), encoding="utf-8")
 
