@@ -67,10 +67,15 @@ def main():
         print("ERROR: CSV empty")
         return 1
 
-    # HOT = sort by volume24h desc, then TTR asc
+    # HOT = sort by volume24h desc, then TTR asc.
+    # Exclude markets with TTR > 365 days (far-future markets shouldn't appear in HOT).
+    # If fewer than 12 near-term markets exist, backfill from the far-future pool.
+    MAX_TTR_HOT = 365.0
     hot_scored = [(vol24(r), ttr_days(r), r) for r in rows]
     hot_scored.sort(key=lambda x: (-x[0], x[1]))
-    hot_rows = [r for _, __, r in hot_scored[:12]]
+    hot_near   = [t for t in hot_scored if t[1] is None or t[1] <= MAX_TTR_HOT]
+    hot_far    = [t for t in hot_scored if t[1] is not None and t[1] > MAX_TTR_HOT]
+    hot_rows   = [r for _, __, r in (hot_near + hot_far)[:12]]
 
     # OVERLOOKED pool = exclude HOT, prefer near-50 / negative underround, earlier TTR
     hot_ids = set(str(r.get("id") or r.get("slug") or r.get("url") or r.get("question") or id(r)) for r in hot_rows)
