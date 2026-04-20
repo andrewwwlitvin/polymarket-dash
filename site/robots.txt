@@ -1,3 +1,3 @@
 User-agent: *
 Allow: /
-Sitemap: https://urbanpoly.com/sitemap.xml
+Sitemap: https://www.urbanpoly.com/sitemap.xml
