@@ -252,6 +252,7 @@ def fetch_gamma_open_markets():
     # --- Strategy 1: /events (returns markets nested inside events) ---
     try:
         out, offset = [], 0
+        seen_ids = set()
         while True:
             params = {"closed":"false","active":"true","limit":PAGE_SIZE,
                       "offset":offset,"order":"volume24hr","ascending":"false"}
@@ -259,14 +260,31 @@ def fetch_gamma_open_markets():
             if not batch:
                 break
             for event in batch:
+                cat = event.get("tags", [{}])[0].get("slug","") if event.get("tags") else ""
                 for mkt in (event.get("markets") or []):
-                    # Ensure top-level event fields are available on the market dict
-                    mkt.setdefault("category", event.get("tags", [{}])[0].get("slug","") if event.get("tags") else "")
+                    mid = mkt.get("id") or mkt.get("conditionId") or mkt.get("slug")
+                    if mid in seen_ids:
+                        continue
+                    seen_ids.add(mid)
+                    # Skip dead markets: outcomePrices where all values are 0 or 1 (resolved)
+                    try:
+                        prices = json.loads(mkt.get("outcomePrices") or "[]")
+                        if prices and all(float(p) in (0.0, 1.0) for p in prices):
+                            continue  # already resolved
+                    except Exception:
+                        pass
+                    mkt.setdefault("category", cat)
                     out.append(mkt)
             offset += PAGE_SIZE
             time.sleep(SLEEP)
         if out:
-            print(f"  [events] Got {len(out)} markets via /events")
+            # Sort by individual market volume so sports sub-markets don't crowd the pool
+            def _mkt_vol(m):
+                v = m.get("volume24hr") or m.get("volume24hrClob") or m.get("oneDayVolume") or 0
+                try: return float(v)
+                except: return 0.0
+            out.sort(key=_mkt_vol, reverse=True)
+            print(f"  [events] Got {len(out)} markets via /events (sorted by market vol24hr)")
             return out
         print("  [events] returned empty — falling back to /markets")
     except Exception as e:
