@@ -16,7 +16,7 @@ Usage:
   python scripts/derive_top12_from_csv.py /path/to/polymarket_enriched_fast_*.csv
 """
 
-import sys, csv
+import sys, csv, math
 from pathlib import Path
 from datetime import datetime, timezone
 
@@ -53,7 +53,69 @@ def vol24(row):
     except Exception:
         return 0.0
 
-MAX_PER_EVENT = 3  # max markets from a single event in any one bucket
+MAX_PER_EVENT = 3        # max markets from a single event in any one bucket
+MIN_VOL_OVERLOOKED = 5_000   # minimum $5k/24h — illiquid markets excluded from OVERLOOKED
+
+def overlooked_score(row):
+    """
+    Composite score for OVERLOOKED section.
+    Surfaces opportunistic markets: real volume, genuine uncertainty,
+    near-term resolution, and bettor value.
+
+    Hard filters (return -1e9 to exclude):
+      - volume24h < MIN_VOL_OVERLOOKED  → not tradeable
+      - binaryMidYes outside 10-90%    → near-certain, not a real bet
+
+    Weighted components (each 0..1):
+      vol_score   (35%) — log-scale liquidity, rewards activity
+      uncertainty (30%) — price near 50% = genuine two-sided bet
+      timing      (15%) — resolves sooner is more actionable
+      value       (15%) — negative underround = bettor has edge
+      momentum    ( 5%) — recent price movement = market is live
+    """
+    v24 = vol24(row)
+    if v24 < MIN_VOL_OVERLOOKED:
+        return -1e9
+
+    # Volume: log10 scale, normalized $5k..$5M → 0..1
+    vol_score = min(1.0, math.log10(max(v24, 1)) / math.log10(5_000_000))
+
+    # Uncertainty: continuous, peaks at binaryMidYes=0.5, 0 at extremes
+    mid = fnum(row, "binaryMidYes", -1.0)
+    if mid < 0:
+        # multi-outcome market: use near50Flag as a proxy
+        uncertainty = fnum(row, "near50Flag", 0.0) * 0.6
+    else:
+        if mid < 0.10 or mid > 0.90:
+            return -1e9  # near-certain outcome — not an interesting bet
+        uncertainty = 1.0 - abs(mid - 0.5) * 2.0  # 1.0 at 0.5, 0.0 at 0 or 1
+
+    # Timing: < 90d = full score; decays to 0.1 beyond 365d
+    ttr = ttr_days(row)
+    if ttr <= 0:
+        timing = 0.0
+    elif ttr <= 90:
+        timing = 1.0
+    elif ttr <= 365:
+        timing = 0.4 + 0.6 * (1.0 - (ttr - 90) / 275.0)
+    else:
+        timing = 0.1
+
+    # Value: negative underround → bettor has edge; cap at 1.0
+    under = fnum(row, "underround", 0.0)
+    value_score = min(1.0, max(0.0, -under * 15))  # -0.067 underround → 1.0
+
+    # Momentum: recent price movement signals active, live market
+    mom_pct = fnum(row, "momentumPct24h", 0.0)
+    momentum = min(1.0, abs(mom_pct) / 30.0)  # 30% move → 1.0
+
+    return (
+        0.35 * vol_score
+      + 0.30 * uncertainty
+      + 0.15 * timing
+      + 0.15 * value_score
+      + 0.05 * momentum
+    )
 
 def event_key(row):
     """Grouping key for per-event cap. Uses eventId if present, else category."""
@@ -112,19 +174,27 @@ def main():
     hot_far  = [t for t in hot_scored if t[1] is not None and t[1] > MAX_TTR_HOT]
     hot_rows = pick_capped(hot_near + hot_far, 12)
 
-    # OVERLOOKED pool = exclude HOT, prefer near-50 / negative underround, earlier TTR
-    # Also cap at MAX_PER_EVENT per event.
+    # OVERLOOKED: opportunistic markets — real volume, genuine uncertainty,
+    # near-term resolution, bettor value. Scored by overlooked_score().
+    # Cap at MAX_PER_EVENT per event. Backfill with lower-scored markets if < 12.
     hot_ids = set(str(r.get("id") or r.get("slug") or r.get("url") or r.get("question") or id(r)) for r in hot_rows)
-    pool = []
+    pool, pool_backfill = [], []
     for r in rows:
         rid = str(r.get("id") or r.get("slug") or r.get("url") or r.get("question") or id(r))
         if rid in hot_ids:
             continue
-        near50 = fnum(r, "near50Flag", 0.0)
-        under = fnum(r, "underround", 0.0)
-        pool.append((near50, under, ttr_days(r), r))
-    pool.sort(key=lambda x: (-x[0], x[1], x[2]))
-    gems_rows = pick_capped(pool, 12, already_ids=hot_ids)
+        sc = overlooked_score(r)
+        if sc > -1e8:
+            pool.append((sc, ttr_days(r), r))
+        else:
+            # Only backfill if filtered for low volume, NOT for near-certain price.
+            # Near-certain markets (mid < 10% or > 90%) are excluded entirely.
+            mid_val = fnum(r, "binaryMidYes", -1.0)
+            if mid_val < 0 or (0.10 <= mid_val <= 0.90):
+                pool_backfill.append((fnum(r, "volume24h", 0.0), ttr_days(r), r))
+    pool.sort(key=lambda x: (-x[0], x[1]))
+    pool_backfill.sort(key=lambda x: (-x[0], x[1]))
+    gems_rows = pick_capped(pool + pool_backfill, 12, already_ids=hot_ids)
 
     # write output with bucket/rank
     out_headers = list(headers)
