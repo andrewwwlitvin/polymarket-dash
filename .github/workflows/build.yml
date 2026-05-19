@@ -49,15 +49,28 @@ jobs:
             echo "LATEST_CSV=$recent" >> "$GITHUB_ENV"
           else
             echo "[fetch] Fetching a NEW CSV..."
+            set +e
             python -u "$WORKDIR/scripts/polymarket_enriched_fast.py" --topk 120 --concurrency 8 --fast
+            FETCH_EXIT=$?
+            set -e
             latest=$(find "$WORKDIR" -maxdepth 2 -type f -name 'polymarket_enriched_fast_*.csv' | sort | tail -n1 || true)
-            if [ -z "${latest:-}" ]; then
+            if [ -n "${latest:-}" ]; then
+              base=$(basename "$latest")
+              mv "$latest" "$DATA_DIR/$base"
+              echo "LATEST_CSV=$DATA_DIR/$base" >> "$GITHUB_ENV"
+              echo "[fetch] New CSV: $DATA_DIR/$base"
+            elif [ $FETCH_EXIT -ne 0 ]; then
+              # Live fetch failed — fall back to most recent cached CSV in data/
+              cached=$(find "$DATA_DIR" -maxdepth 1 -type f -name 'polymarket_enriched_fast_*.csv' | sort | tail -n1 || true)
+              if [ -n "${cached:-}" ]; then
+                echo "[fetch] WARNING: live fetch failed (exit $FETCH_EXIT), reusing cached CSV: $cached"
+                echo "LATEST_CSV=$cached" >> "$GITHUB_ENV"
+              else
+                echo "ERROR: Fetcher failed and no cached CSV available"; exit 1
+              fi
+            else
               echo "ERROR: Fetcher did not produce a CSV"; exit 1
             fi
-            base=$(basename "$latest")
-            mv "$latest" "$DATA_DIR/$base"
-            echo "LATEST_CSV=$DATA_DIR/$base" >> "$GITHUB_ENV"
-            echo "[fetch] New CSV: $DATA_DIR/$base"
           fi
 
           echo "[fetch] data/ listing:"
