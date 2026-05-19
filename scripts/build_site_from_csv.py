@@ -555,8 +555,25 @@ def main() -> int:
     long_desc_html = (long_pick.read_text(encoding="utf-8") if long_pick else "<p>Insightful commentary rotates here.</p>")
     save_history(hist)
 
+    # Unique snapshot description: include top market names so each page is distinct
+    def _snap_desc(hot: list, gems: list, date_str: str) -> str:
+        """Generate a per-snapshot meta description that includes real market names."""
+        names = []
+        for r in (hot[:3] + gems[:2]):
+            q = (r.get("question") or r.get("title") or "").strip()
+            if q and q not in names:
+                names.append(q)
+        if names:
+            joined = "; ".join(names[:4])
+            prefix = f"Polymarket snapshot {date_str}: "
+            body = f"HOT & overlooked markets — {joined}."
+            full = prefix + body
+            return full[:160]
+        return short_desc[:160]
+
     now = utc_now()
     human = human_date(now)
+    date_str = now.strftime("%d %b %Y")
 
     # ---------- INDEX ----------
     head = page_head(
@@ -600,9 +617,10 @@ def main() -> int:
 
     # ---------- SNAPSHOT ----------
     snap_name = ts_for_snapshot(now)
+    snap_desc = _snap_desc(hot_rows, gems_rows, date_str)
     head_snap = page_head(
         title=f"Hottest Markets & Overlooked Chances on Polymarket — {human}",
-        description=short_desc[:160],
+        description=snap_desc,
         canonical=f"https://www.urbanpoly.com/{snap_name}",
         og_updated=now,
     )
@@ -756,6 +774,81 @@ def main() -> int:
             print(f"  [warn] Could not patch {html_file.name}: {e}")
     if patched_count:
         print(f"[ok] Patched canonical/og:url in {patched_count} legacy files (non-www → www).")
+
+    # ---------- Patch duplicate descriptions in old snapshot files ----------
+    # Old snapshot pages all shared the same rotating meta description text.
+    # Google treats pages with identical descriptions as thin/duplicate content.
+    # This pass builds a unique description for each old snapshot by extracting
+    # the market titles already present in <h3> tags in the HTML, then rewrites
+    # only files that still carry a generic (non-market-specific) description.
+    _GENERIC_DESC_FRAGMENTS = [
+        "A practical snapshot of polymarket fees",
+        "Daily dashboard of Polymarket heat",
+        "Polymarket Fees & Spread Dashboard",
+        "prediction market sentiment tracker",
+        "Fast to scan, simple to review",
+    ]
+    import re as _re
+
+    def _is_generic_desc(desc_str: str) -> bool:
+        return any(frag.lower() in desc_str.lower() for frag in _GENERIC_DESC_FRAGMENTS)
+
+    desc_patched = 0
+    for html_file in sorted(SITE_DIR.glob("dashboard_*.html")):
+        try:
+            content = html_file.read_text(encoding="utf-8")
+            # Extract existing meta description
+            m_desc = _re.search(r'<meta\s+name="description"\s+content="([^"]*)"', content)
+            if not m_desc:
+                continue
+            existing = m_desc.group(1)
+            if not _is_generic_desc(existing):
+                continue  # already unique
+
+            # Extract market titles from <h3>…</h3> inside .card-body
+            titles = _re.findall(r'<h3>([^<]+)</h3>', content)
+            titles = [t.strip() for t in titles if t.strip()][:4]
+            if not titles:
+                continue
+
+            # Build unique description
+            # Derive date from filename: dashboard_YYYY-MM-DD_HHMM.html
+            fname = html_file.stem  # e.g. dashboard_2025-09-09_2142
+            parts = fname.split("_")
+            date_part = parts[1] if len(parts) > 1 else ""
+            try:
+                snap_dt = datetime.strptime(date_part, "%Y-%m-%d")
+                date_label = snap_dt.strftime("%d %b %Y")
+            except Exception:
+                date_label = date_part
+
+            joined = "; ".join(titles[:3])
+            new_desc = f"Polymarket {date_label}: HOT & overlooked markets — {joined}."[:160]
+            new_desc_escaped = html_lib.escape(new_desc, quote=True)
+
+            # Replace in all three places (meta description, og:description, twitter:description)
+            fixed = _re.sub(
+                r'(<meta\s+name="description"\s+content=")[^"]*(")',
+                lambda mo: mo.group(1) + new_desc_escaped + mo.group(2),
+                content
+            )
+            fixed = _re.sub(
+                r'(<meta\s+property="og:description"\s+content=")[^"]*(")',
+                lambda mo: mo.group(1) + new_desc_escaped + mo.group(2),
+                fixed
+            )
+            fixed = _re.sub(
+                r'(<meta\s+name="twitter:description"\s+content=")[^"]*(")',
+                lambda mo: mo.group(1) + new_desc_escaped + mo.group(2),
+                fixed
+            )
+            if fixed != content:
+                html_file.write_text(fixed, encoding="utf-8")
+                desc_patched += 1
+        except Exception as e:
+            print(f"  [warn] Could not patch description in {html_file.name}: {e}")
+    if desc_patched:
+        print(f"[ok] Patched duplicate descriptions in {desc_patched} legacy snapshot files.")
 
     print("[ok] Wrote index, snapshot, archive (using explicit Top-12 if provided) and re-chained snapshot navigation.")
     return 0
