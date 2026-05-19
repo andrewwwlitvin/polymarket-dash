@@ -43,7 +43,8 @@ OUT_CSV_FULL = f"polymarket_enriched_fast_{TS}.csv"
 OUT_CSV_TOPS = f"polymarket_top12_{TS}.csv"
 
 # --- Endpoints ---
-GAMMA_MARKETS = "https://gamma-api.polymarket.com/markets"
+GAMMA_MARKETS  = "https://gamma-api.polymarket.com/markets"
+GAMMA_EVENTS   = "https://gamma-api.polymarket.com/events"
 
 # Quotes: try conditionId (0x hash) first — that's what CLOB API requires.
 # {cid} = conditionId (0x hex), {id} = numeric Gamma id, {slug} = slug
@@ -108,6 +109,13 @@ def http_get_json(url, params=None, retries=RETRIES, timeout=TIMEOUT):
             return json.loads(data.decode("utf-8"))
         except urllib.error.HTTPError as e:
             last_err = e
+            # Log response body on first 422 so we can diagnose what the API rejects
+            if e.code == 422 and attempt == 1:
+                try:
+                    body = e.read().decode("utf-8", errors="replace")[:400]
+                    print(f"  [warn] HTTP 422 body: {body}")
+                except Exception:
+                    pass
             # 422 / 429 / 503 — back off longer; don't spam the server
             if e.code in (422, 429, 503):
                 wait = min(5.0 * attempt, 30.0)
@@ -234,16 +242,48 @@ def is_binary(quotes):
 
 # --- Fetchers ---
 def fetch_gamma_open_markets():
+    """
+    Fetch open markets. Tries the /events endpoint first (less likely to be
+    rate-limited since it is a different path), falls back to /markets.
+    The events endpoint returns markets nested inside events; we flatten them.
+    """
     print("[1/4] Fetching open markets from Gamma…")
+
+    # --- Strategy 1: /events (returns markets nested inside events) ---
+    try:
+        out, offset = [], 0
+        while True:
+            params = {"closed":"false","active":"true","limit":PAGE_SIZE,
+                      "offset":offset,"order":"volume24hr","ascending":"false"}
+            batch = http_get_json(GAMMA_EVENTS, params=params)
+            if not batch:
+                break
+            for event in batch:
+                for mkt in (event.get("markets") or []):
+                    # Ensure top-level event fields are available on the market dict
+                    mkt.setdefault("category", event.get("tags", [{}])[0].get("slug","") if event.get("tags") else "")
+                    out.append(mkt)
+            offset += PAGE_SIZE
+            time.sleep(SLEEP)
+        if out:
+            print(f"  [events] Got {len(out)} markets via /events")
+            return out
+        print("  [events] returned empty — falling back to /markets")
+    except Exception as e:
+        print(f"  [events] failed ({e}) — falling back to /markets")
+
+    # --- Strategy 2: /markets (original, may be blocked on CI) ---
     out, offset = [], 0
     while True:
-        params = {"closed":"false","active":"true","limit":PAGE_SIZE,"offset":offset,"order":"volumeNum","ascending":"false"}
+        params = {"closed":"false","active":"true","limit":PAGE_SIZE,
+                  "offset":offset,"order":"volumeNum","ascending":"false"}
         batch = http_get_json(GAMMA_MARKETS, params=params)
-        if not batch: break
+        if not batch:
+            break
         out.extend(batch)
         offset += PAGE_SIZE
         time.sleep(SLEEP)
-    print(f"  Got {len(out)} markets")
+    print(f"  [markets] Got {len(out)} markets via /markets")
     return out
 
 def gamma_quotes_from_market(m):
