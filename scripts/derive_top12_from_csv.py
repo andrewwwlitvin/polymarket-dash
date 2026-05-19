@@ -53,6 +53,40 @@ def vol24(row):
     except Exception:
         return 0.0
 
+MAX_PER_EVENT = 3  # max markets from a single event in any one bucket
+
+def event_key(row):
+    """Grouping key for per-event cap. Uses eventId if present, else category."""
+    eid = (row.get("eventId") or "").strip()
+    if eid:
+        return eid
+    # fallback for older CSVs without eventId: use category
+    return row.get("category") or "unknown"
+
+def pick_capped(scored_tuples, n, already_ids=None):
+    """
+    Select up to n rows from scored_tuples (pre-sorted, each tuple ends with the row dict),
+    skipping rows whose event_key already hit MAX_PER_EVENT, and optionally skipping
+    rows whose market-id is in already_ids.
+    Returns list of row dicts.
+    """
+    already_ids = already_ids or set()
+    event_counts = {}
+    result = []
+    for tup in scored_tuples:
+        if len(result) >= n:
+            break
+        r = tup[-1]
+        rid = str(r.get("id") or r.get("slug") or r.get("url") or r.get("question") or id(r))
+        if rid in already_ids:
+            continue
+        ek = event_key(r)
+        if event_counts.get(ek, 0) >= MAX_PER_EVENT:
+            continue
+        event_counts[ek] = event_counts.get(ek, 0) + 1
+        result.append(r)
+    return result
+
 def main():
     if len(sys.argv) < 2:
         print("ERROR: need enriched CSV path")
@@ -70,14 +104,16 @@ def main():
     # HOT = sort by volume24h desc, then TTR asc.
     # Exclude markets with TTR > 365 days (far-future markets shouldn't appear in HOT).
     # If fewer than 12 near-term markets exist, backfill from the far-future pool.
+    # Cap at MAX_PER_EVENT markets from any single event.
     MAX_TTR_HOT = 365.0
     hot_scored = [(vol24(r), ttr_days(r), r) for r in rows]
     hot_scored.sort(key=lambda x: (-x[0], x[1]))
-    hot_near   = [t for t in hot_scored if t[1] is None or t[1] <= MAX_TTR_HOT]
-    hot_far    = [t for t in hot_scored if t[1] is not None and t[1] > MAX_TTR_HOT]
-    hot_rows   = [r for _, __, r in (hot_near + hot_far)[:12]]
+    hot_near = [t for t in hot_scored if t[1] is None or t[1] <= MAX_TTR_HOT]
+    hot_far  = [t for t in hot_scored if t[1] is not None and t[1] > MAX_TTR_HOT]
+    hot_rows = pick_capped(hot_near + hot_far, 12)
 
     # OVERLOOKED pool = exclude HOT, prefer near-50 / negative underround, earlier TTR
+    # Also cap at MAX_PER_EVENT per event.
     hot_ids = set(str(r.get("id") or r.get("slug") or r.get("url") or r.get("question") or id(r)) for r in hot_rows)
     pool = []
     for r in rows:
@@ -88,17 +124,7 @@ def main():
         under = fnum(r, "underround", 0.0)
         pool.append((near50, under, ttr_days(r), r))
     pool.sort(key=lambda x: (-x[0], x[1], x[2]))
-    gems_rows = [r for _, __, ___, r in pool[:12]]
-
-    # backfill if fewer than 12
-    if len(gems_rows) < 12:
-        for _, __, ___, r in pool[12:]:
-            rid = str(r.get("id") or r.get("slug") or r.get("url") or r.get("question") or id(r))
-            if rid in hot_ids or r in gems_rows:
-                continue
-            gems_rows.append(r)
-            if len(gems_rows) >= 12:
-                break
+    gems_rows = pick_capped(pool, 12, already_ids=hot_ids)
 
     # write output with bucket/rank
     out_headers = list(headers)

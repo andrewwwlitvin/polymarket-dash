@@ -274,6 +274,7 @@ def fetch_gamma_open_markets():
                     except Exception:
                         pass
                     mkt.setdefault("category", cat)
+                    mkt.setdefault("eventId", str(event.get("id") or event.get("slug") or ""))
                     out.append(mkt)
             offset += PAGE_SIZE
             time.sleep(SLEEP)
@@ -604,7 +605,7 @@ def main():
     enriched = fast_enrich(topk, concurrency=args.concurrency, use_proxy_spread=not args.no_proxy_spread)
 
     # Write full list (dashboard-friendly fields included)
-    fields = ["id","conditionId","slug","url","embedSrc","question","category","why",
+    fields = ["id","conditionId","slug","url","embedSrc","question","category","eventId","why",
               "volume","volume24h","momentumDelta24h","momentumPct24h",
               "endDateISO","timeToResolveDays","outcomeCount","avgSpread","underround",
               "binaryMidYes","near50Flag","bestQuotesJSON"]
