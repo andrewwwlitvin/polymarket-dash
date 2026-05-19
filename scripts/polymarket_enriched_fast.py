@@ -90,21 +90,34 @@ def days_to_resolve(end_dt):
     return (end_dt - now).total_seconds()/86400.0
 
 def http_get_json(url, params=None, retries=RETRIES, timeout=TIMEOUT):
+    import urllib.error
     last_err = None
     full = url + ("?" + urllib.parse.urlencode(params) if params else "")
     for attempt in range(1, retries+1):
         try:
             req = urllib.request.Request(full, headers={
-                "User-Agent":"python-urllib",
-                "Accept":"application/json",
-                "Connection":"close",
+                "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+                "Accept": "application/json, text/plain, */*",
+                "Accept-Language": "en-US,en;q=0.9",
+                "Referer": "https://polymarket.com/",
+                "Origin": "https://polymarket.com",
+                "Connection": "keep-alive",
             })
             with urllib.request.urlopen(req, timeout=timeout) as resp:
                 data = resp.read()
             return json.loads(data.decode("utf-8"))
+        except urllib.error.HTTPError as e:
+            last_err = e
+            # 422 / 429 / 503 — back off longer; don't spam the server
+            if e.code in (422, 429, 503):
+                wait = min(5.0 * attempt, 30.0)
+                print(f"  [warn] HTTP {e.code} on attempt {attempt}, sleeping {wait}s…")
+                time.sleep(wait)
+            else:
+                time.sleep(min(0.25 * attempt, 1.0))
         except Exception as e:
             last_err = e
-            time.sleep(min(0.25*attempt, 1.0))
+            time.sleep(min(0.25 * attempt, 1.0))
     raise last_err
 
 # --- Expanded parser: supports orderBook/book, nested quote/book in outcomes, flat best fields, arrays ---
