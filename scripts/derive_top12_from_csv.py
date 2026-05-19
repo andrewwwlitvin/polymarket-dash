@@ -55,6 +55,60 @@ def vol24(row):
 
 MAX_PER_EVENT = 3        # max markets from a single event in any one bucket
 MIN_VOL_OVERLOOKED = 5_000   # minimum $5k/24h — illiquid markets excluded from OVERLOOKED
+MAX_TTR_HOT = 365.0          # hard ceiling for HOT — far-future markets excluded entirely
+
+def hot_score(row):
+    """
+    Composite score for HOT section.
+    Volume is the primary signal, but penalises near-certain markets and
+    rewards near-term resolution and active price movement.
+
+    Hard filters (return -1e9 to exclude):
+      - TTR <= 0 or TTR > MAX_TTR_HOT  → resolved or far-future
+      - volume24h < 1 000              → noise
+
+    Multipliers (applied to log10(volume)):
+      uncertainty (0.4–1.0) — peaks at 50% mid; near-certain markets
+                               get 0.4× (still can rank if volume is huge)
+      timing      (0.8–1.5) — today=1.5, this week=1.2, month=1.1,
+                               quarter=1.0, up to 365d=0.8
+      momentum    (+0–30%)  — absolute 24h price move; rewards live markets
+    """
+    v24 = vol24(row)
+    if v24 < 1_000:
+        return -1e9
+
+    ttr = ttr_days(row)
+    if ttr <= 0 or ttr > MAX_TTR_HOT:
+        return -1e9
+
+    # Base: log-scale volume
+    vol_s = math.log10(max(v24, 1))
+
+    # Uncertainty multiplier: smooth 0.4 at extremes → 1.0 at 50%
+    mid = fnum(row, "binaryMidYes", -1.0)
+    if mid < 0:
+        unc = 0.75  # multi-outcome: neutral
+    else:
+        unc = 0.4 + 0.6 * (1.0 - abs(mid - 0.5) * 2.0)
+
+    # Timing multiplier: near-term resolution is more actionable
+    if ttr <= 1:
+        timing = 1.5   # resolves today
+    elif ttr <= 7:
+        timing = 1.2   # this week
+    elif ttr <= 30:
+        timing = 1.1   # this month
+    elif ttr <= 90:
+        timing = 1.0   # this quarter
+    else:
+        timing = 0.8   # up to 365d
+
+    # Momentum bonus: big price move = something is happening
+    mom_pct = fnum(row, "momentumPct24h", 0.0)
+    momentum = min(0.30, abs(mom_pct) / 100.0)
+
+    return vol_s * unc * timing * (1.0 + momentum)
 
 def overlooked_score(row):
     """
@@ -163,16 +217,16 @@ def main():
         print("ERROR: CSV empty")
         return 1
 
-    # HOT = sort by volume24h desc, then TTR asc.
-    # Exclude markets with TTR > 365 days (far-future markets shouldn't appear in HOT).
-    # If fewer than 12 near-term markets exist, backfill from the far-future pool.
+    # HOT = high volume × uncertainty × timing × momentum.
+    # Far-future markets (TTR > MAX_TTR_HOT) are hard-excluded by hot_score().
     # Cap at MAX_PER_EVENT markets from any single event.
-    MAX_TTR_HOT = 365.0
-    hot_scored = [(vol24(r), ttr_days(r), r) for r in rows]
+    hot_scored = []
+    for r in rows:
+        sc = hot_score(r)
+        if sc > -1e8:
+            hot_scored.append((sc, ttr_days(r), r))
     hot_scored.sort(key=lambda x: (-x[0], x[1]))
-    hot_near = [t for t in hot_scored if t[1] is None or t[1] <= MAX_TTR_HOT]
-    hot_far  = [t for t in hot_scored if t[1] is not None and t[1] > MAX_TTR_HOT]
-    hot_rows = pick_capped(hot_near + hot_far, 12)
+    hot_rows = pick_capped(hot_scored, 12)
 
     # OVERLOOKED: opportunistic markets — real volume, genuine uncertainty,
     # near-term resolution, bettor value. Scored by overlooked_score().

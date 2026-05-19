@@ -49,7 +49,7 @@ jobs:
             echo "LATEST_CSV=$recent" >> "$GITHUB_ENV"
           else
             echo "[fetch] Fetching a NEW CSV..."
-            python -u "$WORKDIR/scripts/polymarket_enriched_fast.py" --topk 120 --concurrency 8 --fast
+            python -u "$WORKDIR/scripts/polymarket_enriched_fast.py" --topk 250 --concurrency 12 --fast
             latest=$(find "$WORKDIR" -maxdepth 1 -type f -name 'polymarket_enriched_fast_*.csv' | sort | tail -n1 || true)
             if [ -z "${latest:-}" ]; then
               echo "ERROR: Fetcher did not produce a CSV"; exit 1
