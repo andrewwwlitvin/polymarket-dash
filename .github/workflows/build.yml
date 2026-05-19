@@ -53,7 +53,8 @@ jobs:
             python -u "$WORKDIR/scripts/polymarket_enriched_fast.py" --topk 120 --concurrency 8 --fast
             FETCH_EXIT=$?
             set -e
-            latest=$(find "$WORKDIR" -maxdepth 2 -type f -name 'polymarket_enriched_fast_*.csv' | sort | tail -n1 || true)
+            # Only look in WORKDIR root — the script writes CSV there, NOT inside data/
+            latest=$(find "$WORKDIR" -maxdepth 1 -type f -name 'polymarket_enriched_fast_*.csv' | sort | tail -n1 || true)
             if [ -n "${latest:-}" ]; then
               base=$(basename "$latest")
               mv "$latest" "$DATA_DIR/$base"
