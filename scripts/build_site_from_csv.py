@@ -333,7 +333,7 @@ def build_card(row: Dict[str, Any]) -> str:
 def page_head(title: str, description: str, canonical: str, og_updated: datetime) -> str:
     if canonical.endswith("archive.html"):
         keywords = "polymarket archive, prediction markets archive, polymarket snapshots, dashboard history"
-    elif canonical.endswith("index.html"):
+    elif canonical in ("https://www.urbanpoly.com/", "https://www.urbanpoly.com/index.html"):
         keywords = "polymarket, prediction markets, polymarket odds, election odds, betting markets, dashboard"
     else:
         keywords = "polymarket snapshot, prediction markets snapshot, polymarket odds, election odds, dashboard"
@@ -562,7 +562,7 @@ def main() -> int:
     head = page_head(
         title=f"Hottest Markets & Overlooked Chances on Polymarket Today — {human}",
         description=short_desc[:160],
-        canonical="https://www.urbanpoly.com/index.html",
+        canonical="https://www.urbanpoly.com/",
         og_updated=now,
     )
     top_nav = build_nav_top("index")
@@ -697,7 +697,7 @@ def main() -> int:
     sm = ['<?xml version="1.0" encoding="UTF-8"?>','<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">']
     # Index — refreshes every ~6h, highest priority
     sm += ["<url>",
-           "<loc>https://www.urbanpoly.com/index.html</loc>",
+           "<loc>https://www.urbanpoly.com/</loc>",
            f"<lastmod>{iso_og_time(now)}</lastmod>",
            "<changefreq>hourly</changefreq>",
            "<priority>1.0</priority>",
@@ -726,6 +726,36 @@ def main() -> int:
                "</url>"]
     sm.append("</urlset>")
     (SITE_DIR / "sitemap.xml").write_text("\n".join(sm), encoding="utf-8")
+
+    # ---------- Patch legacy non-www canonicals in ALL site/*.html ----------
+    # Old snapshot files written before the www-canonicalization fix still declare
+    # https://urbanpoly.com/... (no www) or https://www.urbanpoly.com/index.html.
+    # Google saw those and chose non-www as its preferred canonical, blocking indexing.
+    # This pass fixes every affected file so all pages consistently declare www.
+    patched_count = 0
+    for html_file in SITE_DIR.glob("*.html"):
+        try:
+            content = html_file.read_text(encoding="utf-8")
+            fixed = content.replace(
+                'href="https://urbanpoly.com/', 'href="https://www.urbanpoly.com/'
+            ).replace(
+                'content="https://urbanpoly.com/', 'content="https://www.urbanpoly.com/'
+            ).replace(
+                '"https://urbanpoly.com/#', '"https://www.urbanpoly.com/#'
+            ).replace(
+                'href="https://www.urbanpoly.com/index.html"',
+                'href="https://www.urbanpoly.com/"'
+            ).replace(
+                'content="https://www.urbanpoly.com/index.html"',
+                'content="https://www.urbanpoly.com/"'
+            )
+            if fixed != content:
+                html_file.write_text(fixed, encoding="utf-8")
+                patched_count += 1
+        except Exception as e:
+            print(f"  [warn] Could not patch {html_file.name}: {e}")
+    if patched_count:
+        print(f"[ok] Patched canonical/og:url in {patched_count} legacy files (non-www → www).")
 
     print("[ok] Wrote index, snapshot, archive (using explicit Top-12 if provided) and re-chained snapshot navigation.")
     return 0
