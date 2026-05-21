@@ -109,13 +109,18 @@ def http_get_json(url, params=None, retries=RETRIES, timeout=TIMEOUT):
             return json.loads(data.decode("utf-8"))
         except urllib.error.HTTPError as e:
             last_err = e
-            # Log response body on first 422 so we can diagnose what the API rejects
-            if e.code == 422 and attempt == 1:
-                try:
-                    body = e.read().decode("utf-8", errors="replace")[:400]
-                    print(f"  [warn] HTTP 422 body: {body}")
-                except Exception:
-                    pass
+            # Read body once so we can inspect it
+            try:
+                body = e.read().decode("utf-8", errors="replace")
+            except Exception:
+                body = ""
+            if e.code == 422:
+                print(f"  [warn] HTTP 422 body: {body[:400]}")
+                # Gamma API now enforces a maximum offset on list queries.
+                # Treat this as "no more pages" rather than a hard error.
+                if "offset exceeds maximum" in body:
+                    print("  [info] Offset limit reached — stopping pagination.")
+                    return []
             # 422 / 429 / 503 — back off longer; don't spam the server
             if e.code in (422, 429, 503):
                 wait = min(5.0 * attempt, 30.0)
