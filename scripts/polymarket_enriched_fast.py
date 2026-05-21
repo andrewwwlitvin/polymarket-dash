@@ -35,6 +35,10 @@ PAGE_SIZE = 200
 TOPK_DEFAULT = 120
 CONCURRENCY_DEFAULT = 8
 
+# Sentinel returned by http_get_json when the API's offset limit is hit,
+# so callers can distinguish "no more pages" from "hit the cap".
+_OFFSET_LIMIT_SENTINEL = object()
+
 def timestamp_tag():
     return datetime.now().strftime("%Y%m%d_%H%M%S")
 
@@ -120,7 +124,7 @@ def http_get_json(url, params=None, retries=RETRIES, timeout=TIMEOUT):
                 # Treat this as "no more pages" rather than a hard error.
                 if "offset exceeds maximum" in body:
                     print("  [info] Offset limit reached — stopping pagination.")
-                    return []
+                    return _OFFSET_LIMIT_SENTINEL
             # 422 / 429 / 503 — back off longer; don't spam the server
             if e.code in (422, 429, 503):
                 wait = min(5.0 * attempt, 30.0)
@@ -256,14 +260,19 @@ def fetch_gamma_open_markets():
 
     # --- Strategy 1: /events (returns markets nested inside events) ---
     try:
-        out, offset = [], 0
+        out, offset, pages = [], 0, 0
         seen_ids = set()
+        stop_reason = "natural_end"
         while True:
             params = {"closed":"false","active":"true","limit":PAGE_SIZE,
                       "offset":offset,"order":"volume24hr","ascending":"false"}
             batch = http_get_json(GAMMA_EVENTS, params=params)
+            if batch is _OFFSET_LIMIT_SENTINEL:
+                stop_reason = "offset_limit"
+                break
             if not batch:
                 break
+            pages += 1
             for event in batch:
                 cat = event.get("tags", [{}])[0].get("slug","") if event.get("tags") else ""
                 for mkt in (event.get("markets") or []):
@@ -290,24 +299,31 @@ def fetch_gamma_open_markets():
                 try: return float(v)
                 except: return 0.0
             out.sort(key=_mkt_vol, reverse=True)
-            print(f"  [events] Got {len(out)} markets via /events (sorted by market vol24hr)")
+            print(f"  [events] Got {len(out)} markets via /events "
+                  f"({pages} pages, max_offset={offset - PAGE_SIZE}, stop={stop_reason})")
             return out
         print("  [events] returned empty — falling back to /markets")
     except Exception as e:
         print(f"  [events] failed ({e}) — falling back to /markets")
 
     # --- Strategy 2: /markets (original, may be blocked on CI) ---
-    out, offset = [], 0
+    out, offset, pages = [], 0, 0
+    stop_reason = "natural_end"
     while True:
         params = {"closed":"false","active":"true","limit":PAGE_SIZE,
                   "offset":offset,"order":"volumeNum","ascending":"false"}
         batch = http_get_json(GAMMA_MARKETS, params=params)
+        if batch is _OFFSET_LIMIT_SENTINEL:
+            stop_reason = "offset_limit"
+            break
         if not batch:
             break
+        pages += 1
         out.extend(batch)
         offset += PAGE_SIZE
         time.sleep(SLEEP)
-    print(f"  [markets] Got {len(out)} markets via /markets")
+    print(f"  [markets] Got {len(out)} markets via /markets "
+          f"({pages} pages, max_offset={offset - PAGE_SIZE}, stop={stop_reason})")
     return out
 
 def gamma_quotes_from_market(m):
