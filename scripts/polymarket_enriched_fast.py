@@ -570,10 +570,16 @@ def fast_enrich(top_markets, concurrency, use_proxy_spread=True):
 def rank_hot(rows):
     # Prefer 24h volume; fallback to lifetime. Reward tight spreads & time proximity.
     # Hard-penalise markets more than 365 days away — they shouldn't appear in HOT.
+    # Require minimum 24h volume so stale/dead markets can't appear as HOT.
+    MIN_VOL24_HOT = 500  # must have at least $500 in 24h volume to qualify
+    candidates = [r for r in rows if isinstance(r.get("volume24h"), (int, float)) and r["volume24h"] >= MIN_VOL24_HOT]
+    if not candidates:
+        candidates = rows  # safety fallback if somehow everything is zero
+
     def key(r):
         vol24 = r.get("volume24h")
-        volL  = r.get("volume") or 0.0
-        vol = vol24 if isinstance(vol24,(int,float)) and vol24 else volL
+        # Use 24h volume directly; only fall back to lifetime if vol24h is genuinely missing (None)
+        vol = vol24 if isinstance(vol24, (int, float)) else (r.get("volume") or 0.0)
         spread = r.get("avgSpread")
         ttr = r.get("timeToResolveDays")
         # Hard penalty: markets more than 365 days away get a near-zero TTR component
@@ -583,7 +589,7 @@ def rank_hot(rows):
             ttr_component = (1.0/(1.0+(ttr or 365)/30.0))
         spread_component = (1.0/(1.0+spread*100)) if (isinstance(spread,(int,float)) and spread is not None and spread>=0) else 0.5
         return (math.log1p(vol)*1.3) + (spread_component*2.0) + (ttr_component*1.2)
-    return sorted(rows, key=key, reverse=True)[:12]
+    return sorted(candidates, key=key, reverse=True)[:12]
 
 def rank_gems(rows):
     # Hidden gems: near 50, underround < 0, moderate 24h vol, soonish
