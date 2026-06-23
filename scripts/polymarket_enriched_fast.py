@@ -122,7 +122,7 @@ def http_get_json(url, params=None, retries=RETRIES, timeout=TIMEOUT):
                 print(f"  [warn] HTTP 422 body: {body[:400]}")
                 # Gamma API now enforces a maximum offset on list queries.
                 # Treat this as "no more pages" rather than a hard error.
-                if "offset exceeds maximum" in body:
+                if "offset exceeds maximum" in body or "offset too large" in body:
                     print("  [info] Offset limit reached — stopping pagination.")
                     return _OFFSET_LIMIT_SENTINEL
             # 422 / 429 / 503 — back off longer; don't spam the server
@@ -258,17 +258,26 @@ def fetch_gamma_open_markets():
     """
     print("[1/4] Fetching open markets from Gamma…")
 
-    # --- Strategy 1: /events (returns markets nested inside events) ---
+    # --- Strategy 1: /events/keyset (cursor-based, no offset cap) ---
     try:
-        out, offset, pages = [], 0, 0
+        out, pages = [], 0
         seen_ids = set()
-        stop_reason = "natural_end"
+        cursor = None
         while True:
-            params = {"closed":"false","active":"true","limit":PAGE_SIZE,
-                      "offset":offset,"order":"volume24hr","ascending":"false"}
-            batch = http_get_json(GAMMA_EVENTS, params=params)
-            if batch is _OFFSET_LIMIT_SENTINEL:
-                stop_reason = "offset_limit"
+            params = {"closed":"false","active":"true","limit":100,
+                      "order":"volume24hr","ascending":"false"}
+            if cursor:
+                params["next_cursor"] = cursor
+            resp = http_get_json(GAMMA_EVENTS + "/keyset", params=params)
+            if resp is _OFFSET_LIMIT_SENTINEL:
+                break
+            if isinstance(resp, dict):
+                batch = resp.get("events", [])
+                cursor = resp.get("next_cursor", "")
+            elif isinstance(resp, list):
+                batch = resp
+                cursor = ""
+            else:
                 break
             if not batch:
                 break
@@ -290,7 +299,8 @@ def fetch_gamma_open_markets():
                     mkt.setdefault("category", cat)
                     mkt.setdefault("eventId", str(event.get("id") or event.get("slug") or ""))
                     out.append(mkt)
-            offset += PAGE_SIZE
+            if not cursor:
+                break
             time.sleep(SLEEP)
         if out:
             # Sort by individual market volume so sports sub-markets don't crowd the pool
@@ -299,31 +309,39 @@ def fetch_gamma_open_markets():
                 try: return float(v)
                 except: return 0.0
             out.sort(key=_mkt_vol, reverse=True)
-            print(f"  [events] Got {len(out)} markets via /events "
-                  f"({pages} pages, max_offset={offset - PAGE_SIZE}, stop={stop_reason})")
+            print(f"  [events] Got {len(out)} markets via /events/keyset ({pages} pages)")
             return out
-        print("  [events] returned empty — falling back to /markets")
+        print("  [events/keyset] returned empty — falling back to /markets")
     except Exception as e:
-        print(f"  [events] failed ({e}) — falling back to /markets")
+        print(f"  [events/keyset] failed ({e}) — falling back to /markets")
 
-    # --- Strategy 2: /markets (original, may be blocked on CI) ---
-    out, offset, pages = [], 0, 0
-    stop_reason = "natural_end"
+    # --- Strategy 2: /markets/keyset fallback ---
+    out, pages = [], 0
+    cursor = None
     while True:
-        params = {"closed":"false","active":"true","limit":PAGE_SIZE,
-                  "offset":offset,"order":"volumeNum","ascending":"false"}
-        batch = http_get_json(GAMMA_MARKETS, params=params)
-        if batch is _OFFSET_LIMIT_SENTINEL:
-            stop_reason = "offset_limit"
+        params = {"closed":"false","active":"true","limit":100,
+                  "order":"volumeNum","ascending":"false"}
+        if cursor:
+            params["next_cursor"] = cursor
+        resp = http_get_json(GAMMA_MARKETS + "/keyset", params=params)
+        if resp is _OFFSET_LIMIT_SENTINEL:
+            break
+        if isinstance(resp, dict):
+            batch = resp.get("markets", resp.get("data", []))
+            cursor = resp.get("next_cursor", "")
+        elif isinstance(resp, list):
+            batch = resp
+            cursor = ""
+        else:
             break
         if not batch:
             break
         pages += 1
         out.extend(batch)
-        offset += PAGE_SIZE
+        if not cursor:
+            break
         time.sleep(SLEEP)
-    print(f"  [markets] Got {len(out)} markets via /markets "
-          f"({pages} pages, max_offset={offset - PAGE_SIZE}, stop={stop_reason})")
+    print(f"  [markets] Got {len(out)} markets via /markets/keyset ({pages} pages)")
     return out
 
 def gamma_quotes_from_market(m):
