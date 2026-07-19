@@ -2,13 +2,13 @@
 <urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
 <url>
 <loc>https://www.urbanpoly.com/</loc>
-<lastmod>2026-07-18T19:12:36Z</lastmod>
+<lastmod>2026-07-19T03:22:43Z</lastmod>
 <changefreq>hourly</changefreq>
 <priority>1.0</priority>
 </url>
 <url>
 <loc>https://www.urbanpoly.com/archive.html</loc>
-<lastmod>2026-07-18T19:12:36Z</lastmod>
+<lastmod>2026-07-19T03:22:43Z</lastmod>
 <changefreq>daily</changefreq>
 <priority>0.6</priority>
 </url>
@@ -43,6 +43,12 @@
 <priority>0.4</priority>
 </url>
 <url>
+<loc>https://www.urbanpoly.com/dashboard_2025-09-12_0144.html</loc>
+<lastmod>2025-09-12T01:44:00Z</lastmod>
+<changefreq>never</changefreq>
+<priority>0.4</priority>
+</url>
+<url>
 <loc>https://www.urbanpoly.com/dashboard_2025-09-13_0632.html</loc>
 <lastmod>2025-09-13T06:32:00Z</lastmod>
 <changefreq>never</changefreq>
@@ -69,12 +75,6 @@
 <url>
 <loc>https://www.urbanpoly.com/dashboard_2025-09-11_1831.html</loc>
 <lastmod>2025-09-11T18:31:00Z</lastmod>
-<changefreq>never</changefreq>
-<priority>0.4</priority>
-</url>
-<url>
-<loc>https://www.urbanpoly.com/dashboard_2025-09-12_0144.html</loc>
-<lastmod>2025-09-12T01:44:00Z</lastmod>
 <changefreq>never</changefreq>
 <priority>0.4</priority>
 </url>
